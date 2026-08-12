@@ -1,5 +1,5 @@
 import { CI_GLYPH, CI_LABEL, CI_ROLE } from './ci.mjs';
-import { esc, graphCss, graphSvg, layoutGraph } from './graph.mjs';
+import { esc, graphCss, graphSvg, layoutGraph, rankCensus } from './graph.mjs';
 
 function ciBadge(ci) {
   const role = CI_ROLE[ci.state];
@@ -42,6 +42,24 @@ function ownerBadge(n) {
   return '';
 }
 
+// Which rank this PR is in, and whether that rank has an order inside it.
+//
+// The text form is the page without the SVG, and a plain vertical list has
+// exactly the defect the drawing had: it reads as a sequence. Grouping by repo
+// makes that worse, because it scatters the PRs that share a rank -- twenty
+// independent PRs come out as twenty numbered lines under five headings, in an
+// order that is alphabetical and means nothing. So each row carries its rank and
+// says, on itself, how many PRs share that rank and that there is no order among
+// them. Structural, not advice: it names the absence of a constraint.
+function rankBadge(n, census) {
+  const where = `rank ${n.rank + 1} of ${census.maxRank + 1}`;
+  if (census.tangled.has(n.rank))
+    return `<span class="badge critical"><span class="g">!</span>${where} · a cycle links two in it</span>`;
+  const count = census.counts[n.rank] || 1;
+  const rest = count > 1 ? `any order among the ${count} in it` : 'the only PR in it';
+  return `<span class="badge step"><span class="g">∥</span>${where} · ${rest}</span>`;
+}
+
 // How a node refers to another node: bare number inside its own repo's section,
 // fully qualified when the edge leaves the repo. A target in a private repo
 // never prints the repo name.
@@ -52,7 +70,7 @@ const refTo = (from, to) =>
 // adjacency list: every PR appears once, and every edge it is on is named on it,
 // with the direction spelled out both ways round ("needs first" in, "needed by"
 // out). It is what the page falls back to when the SVG does not render.
-function nodeRow(n) {
+function nodeRow(n, census) {
   const ref = `#${n.number}`;
 
   const badges = [];
@@ -71,6 +89,7 @@ function nodeRow(n) {
         ? '<span class="badge good"><span class="g">✓</span>no prerequisites</span>'
         : `<span class="badge warning"><span class="g">⊘</span>blocked ×${blockers.length}</span>`
     );
+    badges.push(rankBadge(n, census));
     if (n.cycle)
       badges.push(
         '<span class="badge critical"><span class="g">!</span>in a dependency cycle</span>'
@@ -79,6 +98,7 @@ function nodeRow(n) {
   } else {
     // A referenced PR carries the state of the thing itself, which is what tells
     // you whether the PRs pointing at it are still blocked.
+    badges.push(rankBadge(n, census));
     const e = n.neededBy[0];
     if (e) badges.push(`<span class="status">${esc(e.edge.status)}</span>`);
   }
@@ -126,27 +146,43 @@ export function render({ graph, groups, author, org, generatedAt, withheld, tota
   if (!graph.layout) graph.layout = layoutGraph(graph);
   const edgeCount = graph.edges.filter(e => !e.cycle).length;
   const svg = graphSvg(graph);
+  const census = rankCensus(graph);
+  const row = n => nodeRow(n, census);
 
   const body = groups
     .map(g => {
       const heading = g.withheld
         ? `<h2>${esc(g.label)}</h2>`
         : `<h2>${esc(g.repo)} <span class="count">${g.count} open</span></h2>`;
-      const mine = g.mine.map(nodeRow).join('');
+      const mine = g.mine.map(row).join('');
       const referenced = g.referenced.length
         ? `<p class="readup">referenced only — drawn because something above needs ${
             g.referenced.length === 1 ? 'it' : 'them'
           }, not counted in the open set</p>
-           <ul class="tree">${g.referenced.map(nodeRow).join('')}</ul>`
+           <ul class="tree">${g.referenced.map(row).join('')}</ul>`
         : '';
       return `<section class="repo">
       ${heading}
       <p class="readup">every PR once, with every edge it is on — a prerequisite merges before the PR that needs it</p>
+      <p class="readup notorder">listed by number, not in merge order — the rank badge on each PR is where the order is</p>
       ${mine ? `<ul class="tree root">${mine}</ul>` : ''}
       ${referenced}
     </section>`;
     })
     .join('');
+
+  // The list is the page without the SVG, and it inherits the drawing's old
+  // problem: read top to bottom it looks like a running order, when in fact the
+  // sort key is a repo name and a PR number. Said once here, in full, and again
+  // as a rank badge on every single row.
+  const notRunningOrder = `<p class="notice norder"><strong>The list below is not a running order.</strong>
+  PRs are listed by number, under the repo they live in — that sort says nothing about when anything
+  merges. The order lives in the <strong>rank</strong> badge on each PR:
+  <span class="badge step"><span class="g">∥</span>rank 1 of ${census.maxRank + 1}</span> and
+  <span class="badge step"><span class="g">∥</span>rank 2 of ${census.maxRank + 1}</span> are
+  ordered against each other, but everything sharing one rank is independent of everything else in
+  that rank — any order between them, or all at the same time. Each badge says how many PRs share
+  its rank.</p>`;
 
   // The notice counts only PRs this page would otherwise have drawn, so it
   // measures what privacy is hiding and nothing else. It also says whether any
@@ -179,7 +215,7 @@ export function render({ graph, groups, author, org, generatedAt, withheld, tota
 <title>PR dependency graph — merge from the bottom up — ${esc(author)} @ ${esc(org)}</title>
 <style>
 :root{
-  --surface:#fcfcfb; --raised:#ffffff;
+  --surface:#fcfcfb; --raised:#ffffff; --band:#f1f0ea;
   --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
   --rule:#e1e0d9; --ring:rgba(11,11,11,.10);
   --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b;
@@ -187,7 +223,7 @@ export function render({ graph, groups, author, org, generatedAt, withheld, tota
 }
 @media (prefers-color-scheme:dark){
   :root{
-    --surface:#1a1a19; --raised:#222221;
+    --surface:#1a1a19; --raised:#222221; --band:#131312;
     --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
     --rule:#2c2c2a; --ring:rgba(255,255,255,.10);
     --good-ink:#4cc44c; --warning-ink:#fab219; --serious-ink:#ec835a; --critical-ink:#e46a6a;
@@ -238,12 +274,21 @@ ul.edges .why{flex-basis:100%}
 .badge.serious{color:var(--serious-ink)} .badge.critical{color:var(--critical-ink)}
 .badge.muted{color:var(--muted)}
 .badge.foreign{color:var(--ink2);border-style:dashed;background:var(--surface)}
+/* Not a status: a grouping. Dotted, and tinted like the band it names, so a
+   glance ties the row back to the band it sits in on the diagram. */
+.badge.step{color:var(--ink2);border-style:dotted;background:var(--band)}
 .dim{color:var(--muted);font-size:12px;font-weight:400}
 .status{color:var(--ink2);font-size:11px;border:1px solid var(--ring);border-radius:4px;padding:0 5px}
 .gate{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--serious-ink)}
 .why{margin-top:5px;font-size:12px;color:var(--muted)}
 .withheld{border:1px solid var(--ring);border-left:3px solid var(--warning);border-radius:6px;
   padding:10px 12px;font-size:13px;color:var(--ink2);background:var(--raised);margin:0 0 20px}
+/* The list's own version of the band border: the vertical run of PRs below is
+   not a sequence, and this says so before the first repo heading. */
+.norder{border:1px solid var(--ring);border-left:3px solid var(--ink2);border-radius:6px;
+  padding:10px 12px;font-size:13px;color:var(--ink2);background:var(--raised);margin:26px 0 0}
+.norder strong{color:var(--ink)}
+.readup.notorder{color:var(--ink2);margin:0 0 8px}
 details.syntax{border:1px solid var(--ring);border-radius:6px;padding:10px 12px;background:var(--raised);margin-bottom:8px}
 details.syntax summary{cursor:pointer;font-weight:600;font-size:13px}
 details.syntax pre{background:var(--surface);border:1px solid var(--rule);border-radius:4px;
@@ -265,6 +310,11 @@ footer{margin-top:40px;padding-top:12px;border-top:1px solid var(--rule);font-si
 <li>Every arrow runs <strong>from a prerequisite to the PR that waits on it</strong>, so the bottom
     rank merges <strong>first</strong> and the top rank merges <strong>last</strong>.</li>
 <li>A PR with no arrow arriving at it has nothing left to wait for.</li>
+<li><strong>A rank has no order inside it.</strong> Each rank is drawn as one bordered band, and
+    everything inside a band is <strong>independent of everything else in that band</strong> — any
+    order between them, or all at the same time. A band wide enough to wrap onto several rows is
+    still <em>one</em> rank, not several: the border is around all of its rows. Order exists only
+    <strong>between</strong> bands, which is where the arrows and the <em>then</em> markers are.</li>
 <li><strong>Every PR is drawn exactly once.</strong> A PR that two others need is one box with two
     arrows leaving it, not two boxes. Nothing on this page is a copy of anything else on it.</li>
 <li>Every PR listed under a repo heading is by <strong>${esc(author)}</strong>. Somebody else's PR is
@@ -279,12 +329,16 @@ footer{margin-top:40px;padding-top:12px;border-top:1px solid var(--rule);font-si
 it.</strong> ${graph.nodes.length} PR${graph.nodes.length === 1 ? '' : 's'},
 ${edgeCount} dependency edge${edgeCount === 1 ? '' : 's'},
 ${graph.layout.maxRank + 1} rank${graph.layout.maxRank === 0 ? '' : 's'} — laid out by dependency
-depth. The same relationships are written out under the repo headings below, so nothing here depends
+depth. <strong>One bordered band per rank, and nothing inside a band waits on anything else in
+it</strong> — a band that wraps onto several rows is still one rank, so those rows are not steps.
+The same relationships are written out under the repo headings below, so nothing here depends
 on the drawing rendering.</figcaption>
 <div class="gwrap">
 ${svg}
 </div>
 <p class="legend">
+<span><span class="band">band</span> one rank — any order inside it, no order to keep</span>
+<span><span class="k">between bands</span> the only place an order exists</span>
 <span><span class="k">arrow</span> merge the tail before the head</span>
 <span><span class="k">solid line</span> same repo</span>
 <span><span class="k">dashed line</span> crosses repos</span>
@@ -367,6 +421,8 @@ PR's base branch. Failing on both sides is reported as
 the base carries the same red, <strong>not</strong> proof that the PR is otherwise clean — which is
 why the badge says "base is red too" rather than "this PR is fine".</p>
 </details>
+
+${notRunningOrder}
 
 ${body}
 

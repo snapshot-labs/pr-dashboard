@@ -45,6 +45,21 @@ const LANE_W = 108; // left gutter carrying the rank label
 const PAD = 10;
 const PER_ROW = 5; // a rank wider than this wraps onto more rows
 
+// A rank is drawn as ONE enclosing card, and these are its walls.
+//
+// This is the whole point of the card. A rank wider than PER_ROW wraps, and a
+// wrapped row is the same shape as a rank: five boxes side by side with a gap
+// above and below it. Twenty PRs at rank 0 came out as four such rows, so the
+// picture said "these five, then these five, then these five, then these five"
+// about twenty PRs that have no dependency on one another at all and can merge
+// in any order or all at once. The gap alone cannot carry that distinction --
+// ROW_GAP 12 against BAND_GAP 54 is a difference a reader has to measure -- so
+// the rank gets a border around all of its rows and says on itself, inside that
+// border, that nothing in it waits on anything else in it.
+export const BAND_HEAD = 34; // header strip: the rank label and its "any order" note
+export const BAND_FOOT = 10; // padding under the last row, inside the card
+const BAND_INSET = 2; // how far the card sits inside the canvas edge
+
 const REF_CHARS = 20; // what fits NODE_W at 10.5px monospace
 const MARK_CHARS = 25;
 const clip = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
@@ -70,6 +85,47 @@ export function nodeMark(n) {
   return { role: 'muted', glyph: '·', text: n.status || 'not in the open set' };
 }
 
+// --- what a rank actually is ---------------------------------------------
+//
+// Who shares a rank, and whether that rank is genuinely unordered.
+//
+// Two nodes at one rank cannot depend on each other: rankNodes() gives a node
+// one rank past its deepest prerequisite, so an edge always forces its head at
+// least one rank above its tail. The single exception is an edge cut to break a
+// cycle, which contributes no depth and can therefore leave both of its ends on
+// the same rank. So `unordered` is CHECKED against the edge list rather than
+// assumed from the invariant -- a rank carrying a cut edge does not get to tell
+// the reader its members are independent, because two of them are not.
+export function rankCensus(graph) {
+  const nodes = graph.nodes || [];
+  const maxRank = nodes.reduce((m, n) => Math.max(m, n.rank || 0), 0);
+  const counts = new Array(maxRank + 1).fill(0);
+  for (const n of nodes) counts[n.rank || 0]++;
+
+  const tangled = new Set();
+  for (const e of graph.edges || []) if (e.from.rank === e.to.rank) tangled.add(e.from.rank);
+
+  return { maxRank, counts, tangled, unordered: r => !tangled.has(r) };
+}
+
+// The sentence a rank prints on itself. Structural, never an instruction: it
+// reports the absence of an ordering constraint, which is a fact about the
+// graph, and says nothing about whether any of these PRs should be merged.
+export function bandNote(count, unordered) {
+  if (!unordered)
+    return {
+      key: 'CYCLE',
+      text: 'a dependency cycle runs inside this rank — the closing edge is listed below, not drawn',
+      cls: 'cyc'
+    };
+  if (count < 2) return { key: 'ONE PR', text: 'nothing else sits at this rank', cls: '' };
+  return {
+    key: 'ANY ORDER',
+    text: `these ${count} are independent of each other — nothing in this rank waits on anything else in it`,
+    cls: ''
+  };
+}
+
 // --- layout -------------------------------------------------------------
 //
 // Layered by dependency depth, the way a Sugiyama drawing is: rank 0 is every PR
@@ -84,6 +140,8 @@ export function nodeMark(n) {
 //   2. x: a rank that fits one row is centred over its prerequisites; a rank
 //      wider than PER_ROW wraps into a grid, with the nodes that have an arrow
 //      leaving them on the row nearest the rank above, so no arrow crosses a box.
+//      Wrapping is what made the picture lie, so every row of a rank is now
+//      enclosed in that rank's one card (see BAND_HEAD) instead of floating.
 //   3. y: stack the bands from the bottom, so rank 0 sits at the bottom of the
 //      canvas and merge order reads upward.
 export function layoutGraph(graph, opts = {}) {
@@ -170,15 +228,31 @@ export function layoutGraph(graph, opts = {}) {
     ordered.push(list);
   }
 
-  const bandH = rowCount.map(rows => rows * NODE_H + (rows - 1) * ROW_GAP);
+  // Every row of a rank lives inside that rank's card, so the card's height
+  // covers all of them plus the header that names the rank.
+  const bandH = rowCount.map(
+    rows => BAND_HEAD + rows * NODE_H + (rows - 1) * ROW_GAP + BAND_FOOT
+  );
   const height = PAD * 2 + bandH.reduce((a, b) => a + b, 0) + BAND_GAP * Math.max(0, maxRank);
 
+  const census = rankCensus(graph);
   const bands = [];
   let y = height - PAD;
   for (let r = 0; r <= maxRank; r++) {
     const top = y - bandH[r];
-    bands.push({ rank: r, top, height: bandH[r], count: ordered[r].length, ...bandLabel(r, maxRank) });
-    for (const n of ordered[r]) n.y = top + n.row * (NODE_H + ROW_GAP);
+    const count = ordered[r].length;
+    const unordered = census.unordered(r);
+    bands.push({
+      rank: r,
+      top,
+      height: bandH[r],
+      rows: rowCount[r],
+      count,
+      unordered,
+      note: bandNote(count, unordered),
+      ...bandLabel(r, maxRank)
+    });
+    for (const n of ordered[r]) n.y = top + BAND_HEAD + n.row * (NODE_H + ROW_GAP);
     y = top - BAND_GAP;
   }
 
@@ -218,19 +292,66 @@ export function graphSvg(graph, ids = {}) {
   out.push(
     `<desc id="${dId}">Each pull request is drawn exactly once. An arrow runs from a prerequisite` +
       ` upward to the pull request that waits on it, so the bottom rank merges first and the top` +
-      ` rank merges last. Every relationship drawn here is also written out in the per-repository` +
-      ` list below this diagram.</desc>`
+      ` rank merges last. Each rank is enclosed in one bordered band: the pull requests inside a` +
+      ` band are independent of each other and can merge in any order or at the same time, and a` +
+      ` band that wraps onto several rows is still one single rank, not several. Order exists only` +
+      ` between bands, which is where the arrows are. Every relationship drawn here is also written` +
+      ` out in the per-repository list below this diagram.</desc>`
   );
+  // Two arrowheads, deliberately. `dep-arrow` marks a dependency between two
+  // PRs and there is exactly one of them per drawn edge -- a count the tests
+  // assert -- so the rank-to-rank "then" connector, which is not a dependency
+  // and joins no two PRs, carries its own head rather than borrowing that one.
   out.push(
     '<defs><marker id="dep-arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="9"' +
       ' markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">' +
-      '<path class="ahead" d="M0 0 L10 5 L0 10 Z" fill="currentColor"/></marker></defs>'
+      '<path class="ahead" d="M0 0 L10 5 L0 10 Z" fill="currentColor"/></marker>' +
+      '<marker id="step-arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="8"' +
+      ' markerHeight="8" markerUnits="userSpaceOnUse" orient="auto">' +
+      '<path class="shead" d="M0 0 L10 5 L0 10 Z" fill="currentColor"/></marker></defs>'
   );
 
+  // The bands first, behind everything else.
+  //
+  // One card per rank, enclosing every row of it, with the rank's name in the
+  // gutter. A wrapped rank is therefore one bordered thing rather than several
+  // free-floating rows, which is the difference between a picture that implies
+  // an order and one that does not.
+  //
+  // The card's "no order in here" note is NOT drawn here -- see below.
   for (const b of L.bands) {
     out.push(
-      `<text class="rk" x="${PAD}" y="${b.top + 16}">${esc(b.label)}</text>` +
-        `<text class="rksub" x="${PAD}" y="${b.top + 30}">${esc(b.sub)}</text>`
+      `<g class="band">` +
+        `<rect class="bandbox" x="${BAND_INSET}" y="${b.top}"` +
+        ` width="${L.width - BAND_INSET * 2}" height="${b.height}" rx="7"` +
+        ` fill="none" stroke="currentColor"/>` +
+        `<line class="bandrule" x1="${PAD}" y1="${b.top + BAND_HEAD - 7}"` +
+        ` x2="${L.width - PAD}" y2="${b.top + BAND_HEAD - 7}" stroke="currentColor"/>` +
+        // font-size as a presentation attribute, not only in the stylesheet:
+        // the gutter label and the band note share a line, so at the default
+        // 16px of a stylesheet-stripped page they overlap each other.
+        `<text class="rk" x="${PAD + 6}" y="${b.top + 15}" font-size="9"` +
+        ` font-weight="700">${esc(b.label)}</text>` +
+        `<text class="rksub" x="${PAD + 6}" y="${b.top + 27}" font-size="9">${esc(b.sub)}</text>` +
+        `</g>`
+    );
+  }
+
+  // Between two cards there IS an order, so the gap between them gets a mark of
+  // its own. Without it the only difference between "next row of this rank" and
+  // "next rank" is 12 pixels of whitespace against 54, which is a distinction a
+  // reader has to measure rather than see.
+  for (let r = 0; r < L.bands.length - 1; r++) {
+    const below = L.bands[r];
+    const x = PAD + 8;
+    out.push(
+      `<g class="stepgap">` +
+        `<path class="step" fill="none" stroke="currentColor" stroke-width="1.5"` +
+        ` marker-end="url(#step-arrow)"` +
+        ` d="M${x} ${below.top - 6} L${x} ${below.top - BAND_GAP + 8}"/>` +
+        `<text class="steplabel" x="${x + 9}" y="${below.top - Math.round(BAND_GAP / 2) + 3}"` +
+        ` font-size="9" font-weight="700">then</text>` +
+        `</g>`
     );
   }
 
@@ -259,6 +380,10 @@ export function graphSvg(graph, ids = {}) {
   };
 
   // Arrows first, so a box always covers a line rather than the other way round.
+  // Their labels are held back to the end of the pass for the same reason the
+  // band notes are: an edge drawn later was striking through the label of an
+  // edge drawn earlier.
+  const elabels = [];
   for (const e of edges) {
     const sx = e.from.cx + offset(`out:${e.from.key}`, e);
     const sy = e.from.y - 2;
@@ -273,11 +398,27 @@ export function graphSvg(graph, ids = {}) {
         ` marker-end="url(#dep-arrow)" d="M${sx} ${sy} C ${sx} ${mid}, ${tx} ${mid}, ${tx} ${ty}"/>`
     );
     if (e.edge.needsRelease) {
-      out.push(
+      elabels.push(
         `<text class="elabel" x="${Math.round((sx + tx) / 2)}" y="${mid - 4}"` +
           ` text-anchor="middle">release-gated</text>`
       );
     }
+  }
+  out.push(...elabels);
+
+  // The band notes go on AFTER the edges, which is load-bearing rather than
+  // fussy. An edge leaving the top row of a rank exits through that rank's
+  // header, so if the note were painted first the arrows would be drawn straight
+  // across the one sentence on this page that says a rank has no order in it.
+  // Painted last, its halo (paint-order: stroke, in the band's own colour) cuts
+  // a clean gap out of every line that crosses it, and the sentence stays
+  // readable however many arrows leave the rank.
+  for (const b of L.bands) {
+    if (!b.note) continue;
+    out.push(
+      `<text class="bnote ${b.note.cls}" x="${L.left}" y="${b.top + 21}" font-size="9.5">` +
+        `<tspan class="k" font-weight="700">${esc(b.note.key)}</tspan> · ${esc(b.note.text)}</text>`
+    );
   }
 
   for (const n of graph.nodes) {
@@ -324,12 +465,28 @@ svg.depgraph .is-foreign .mark{fill:var(--ink2)}
 svg.depgraph .edge{stroke:var(--ink2)}
 svg.depgraph .edge.cross{stroke-dasharray:5 4}
 svg.depgraph .ahead{fill:var(--ink2)}
+/* One rank = one card. Recessed against the page so the boxes inside it sit on
+   it, which is what makes several wrapped rows read as one enclosed group. */
+svg.depgraph .bandbox{fill:var(--band);stroke:var(--rule)}
+svg.depgraph .bandrule{stroke:var(--rule)}
+svg.depgraph .bnote{font:9.5px ui-sans-serif,system-ui,sans-serif;fill:var(--ink2);
+  paint-order:stroke;stroke:var(--band);stroke-width:3px;stroke-linejoin:round}
+svg.depgraph .bnote .k{font:700 9.5px ui-sans-serif,system-ui,sans-serif;letter-spacing:.08em;
+  fill:var(--ink)}
+svg.depgraph .bnote.cyc .k{fill:var(--critical-ink)}
+/* the order that DOES exist, drawn in the gap the cards do not cover */
+svg.depgraph .step{stroke:var(--ink2)}
+svg.depgraph .shead{fill:var(--ink2)}
+svg.depgraph .steplabel{font:700 9px ui-sans-serif,system-ui,sans-serif;letter-spacing:.06em;
+  fill:var(--ink2)}
 svg.depgraph .rk{font:700 9px ui-sans-serif,system-ui,sans-serif;letter-spacing:.06em;fill:var(--ink2)}
 svg.depgraph .rksub{font:9px ui-sans-serif,system-ui,sans-serif;fill:var(--muted)}
 svg.depgraph .elabel{font:700 8.5px ui-sans-serif,system-ui,sans-serif;letter-spacing:.04em;
   fill:var(--serious-ink);text-transform:uppercase;paint-order:stroke;stroke:var(--surface);
   stroke-width:3px;stroke-linejoin:round}
 .legend{margin:10px 0 0;font-size:11px;color:var(--muted);display:flex;gap:16px;flex-wrap:wrap}
+.legend .band{border:1px solid var(--rule);background:var(--band);border-radius:3px;padding:0 5px;
+  color:var(--ink2);font-family:ui-monospace,monospace}
 .legend span{white-space:nowrap}
 .legend .k{font-family:ui-monospace,monospace;color:var(--ink2)}
 `;

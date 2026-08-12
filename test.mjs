@@ -11,7 +11,7 @@ import {
   isMineFor,
   resolveStatus
 } from './build.mjs';
-import { layoutGraph, NODE_H } from './src/graph.mjs';
+import { bandNote, layoutGraph, NODE_H, rankCensus } from './src/graph.mjs';
 import { render } from './src/render.mjs';
 import { getPr } from './src/github.mjs';
 
@@ -376,6 +376,185 @@ await t('the nodes something waits on land on the row nearest the rank above', (
   const g = buildGraph([...many, sp(1, [edge(S, 15)])]);
   layoutGraph(g);
   assert.equal(at(g, `${S}#15`).row, 0, 'the prerequisite is on the top row of its rank');
+});
+
+// WITHIN a rank there is no order; BETWEEN ranks there is. The drawing used to
+// say the opposite: a rank wider than five wrapped onto extra rows, a wrapped row
+// is the same shape as a rank, and twenty independent PRs at rank 0 came out as
+// four rows that read as four steps. These pin the distinction down at both ends
+// -- a rank is one enclosed thing however many rows it takes, and the only thing
+// that ever separates two of them is an explicit marked gap.
+console.log('SAME RANK = NO ORDER; between ranks = order');
+
+// The band a node is drawn inside, found by geometry rather than by trusting the
+// index -- which is the thing a reader does with their eyes.
+const bandOf = (L, n) => L.bands.find(b => n.y >= b.top && n.y + NODE_H <= b.top + b.height);
+
+await t('no drawn edge ever joins two PRs of the same rank', () => {
+  // The invariant the whole "same rank = no order" claim rests on.
+  const g = buildGraph([
+    sp(1, [edge(S, 2), edge(S, 3)]),
+    sp(2, [edge(S, 3)]),
+    sp(3),
+    sp(4),
+    sp(1225, [], JS)
+  ]);
+  for (const e of g.edges) {
+    assert.notEqual(e.from.rank, e.to.rank, `${e.from.key} -> ${e.to.key} is within one rank`);
+  }
+  assert.deepEqual([...rankCensus(g).tangled], [], 'so no rank is tangled');
+});
+
+await t('a rank that wraps onto several rows is ONE band, not several', () => {
+  const g = buildGraph(Array.from({ length: 12 }, (_, i) => sp(i + 1)));
+  const L = layoutGraph(g);
+  assert.equal(L.bands.length, 1, 'twelve PRs, one rank, one band');
+  assert.equal(L.bands[0].rows, 3, 'drawn on three rows');
+  assert.equal(L.bands[0].count, 12);
+  for (const n of g.nodes) {
+    const b = bandOf(L, n);
+    assert.ok(b, `${n.key} is inside a band`);
+    assert.equal(b.rank, 0, `${n.key} is inside the rank-0 band whatever row it landed on`);
+  }
+});
+
+await t('NEGATIVE: a wrapped row is not given a rank label or a border of its own', () => {
+  // The exact reported defect: three rows that each look like a rank.
+  const html = page(buildGraph(Array.from({ length: 12 }, (_, i) => sp(i + 1))));
+  assert.equal(occurrences(html, 'class="rk"'), 1, 'twelve PRs on three rows, ONE rank label');
+  assert.equal(occurrences(html, 'class="bandbox"'), 1, 'and ONE border, around all three rows');
+  assert.equal(occurrences(html, 'class="stepgap"'), 0, 'no order marker: there is no second rank');
+});
+
+await t('every row of a wrapped rank sits inside that rank, and a second rank does not', () => {
+  const many = Array.from({ length: 12 }, (_, i) => sp(i + 10));
+  const g = buildGraph([...many, sp(1, [edge(S, 15)])]);
+  const L = layoutGraph(g);
+  assert.equal(L.maxRank, 1);
+  assert.ok(new Set(many.map(m => at(g, `${S}#${m.number}`).row)).size > 1, 'rank 0 really wraps');
+  for (const m of many) {
+    assert.equal(bandOf(L, at(g, `${S}#${m.number}`)).rank, 0, `#${m.number} is in the rank-0 band`);
+  }
+  assert.equal(bandOf(L, at(g, `${S}#1`)).rank, 1, 'the dependent is in a DIFFERENT band');
+});
+
+await t('two rows of one rank are closer together than two ranks, and share a border', () => {
+  const many = Array.from({ length: 12 }, (_, i) => sp(i + 10));
+  const g = buildGraph([...many, sp(1, [edge(S, 15)])]);
+  const L = layoutGraph(g);
+  const rowGap = () => {
+    const ys = [...new Set(g.nodes.filter(n => n.rank === 0).map(n => n.y))].sort((a, b) => a - b);
+    return ys[1] - (ys[0] + NODE_H);
+  };
+  const b0 = L.bands[0];
+  const b1 = L.bands[1];
+  const rankGap = b0.top - (b1.top + b1.height);
+  assert.ok(rowGap() < rankGap, `row gap ${rowGap()} must be tighter than rank gap ${rankGap}`);
+  // ...and the gap is not the only carrier, which is the point: the rows are
+  // inside one border and the ranks are not.
+  assert.notEqual(b0.rank, b1.rank);
+  assert.ok(b1.top + b1.height < b0.top, 'the two bands do not overlap');
+});
+
+await t('the rank says on ITSELF that its members have no order, not only in the legend', () => {
+  const html = page(buildGraph(Array.from({ length: 12 }, (_, i) => sp(i + 1))));
+  assert.match(html, /<text class="bnote [^>]*>[^<]*<tspan class="k"[^>]*>ANY ORDER<\/tspan>/,
+    'the words are inside the SVG band itself, not in the legend');
+  assert.match(html, /these 12 are independent of each other/);
+  assert.match(html, /nothing in this rank waits on anything else in it/);
+});
+
+await t('the note counts the PRs actually inside the band', () => {
+  const g = buildGraph(Array.from({ length: 7 }, (_, i) => sp(i + 1)));
+  const L = layoutGraph(g);
+  assert.match(L.bands[0].note.text, /these 7 are independent/);
+  assert.equal(L.bands[0].count, g.nodes.filter(n => bandOf(L, n).rank === 0).length);
+  // and the count in the words is the count in the geometry, not a constant
+  assert.match(bandNote(3, true).text, /these 3 are independent/);
+  assert.equal(bandNote(1, true).key, 'ONE PR');
+  assert.equal(bandNote(9, false).key, 'CYCLE');
+});
+
+await t('a rank of one does not claim an order that is not there', () => {
+  const g = buildGraph([sp(491, [edge(S, 504)]), sp(504)]);
+  const L = layoutGraph(g);
+  for (const b of L.bands) {
+    assert.equal(b.count, 1);
+    assert.equal(b.note.key, 'ONE PR');
+    assert.equal(b.note.text, 'nothing else sits at this rank');
+  }
+  assert.doesNotMatch(page(g), /ANY ORDER/, 'nothing to be unordered against');
+});
+
+await t('a rank holding a cut cycle edge does NOT claim to be unordered', () => {
+  // Checked, not assumed. A cut edge contributes no depth, so it is the one way
+  // both ends of an edge can land on one rank -- here, a PR declaring itself.
+  const g = buildGraph([sp(1, [edge(S, 1)])]);
+  assert.deepEqual([...rankCensus(g).tangled], [0]);
+  const L = layoutGraph(g);
+  assert.equal(L.bands[0].unordered, false);
+  assert.equal(L.bands[0].note.key, 'CYCLE');
+  const html = page(g);
+  assert.doesNotMatch(html, /ANY ORDER/, 'it must not promise independence it cannot prove');
+  assert.match(html, /a dependency cycle runs inside this rank/);
+});
+
+await t('between two ranks there is a marked step, and inside a rank there is none', () => {
+  const g = buildGraph([sp(1, [edge(S, 2)]), sp(2, [edge(S, 3)]), sp(3), sp(4)]);
+  const html = page(g);
+  const L = g.layout;
+  assert.equal(L.maxRank, 2);
+  assert.equal(occurrences(html, 'class="stepgap"'), 2, 'one order marker per gap between ranks');
+  assert.equal(occurrences(html, 'marker-end="url(#step-arrow)"'), 2);
+  assert.equal(occurrences(html, '>then</text>'), 2);
+  // and it is NOT the dependency arrowhead: those stay one per drawn edge
+  assert.equal(occurrences(html, 'marker-end="url(#dep-arrow)"'), g.edges.length);
+});
+
+await t('the SVG text alternative states the same thing, for a reader who gets no picture', () => {
+  const html = page(buildGraph([sp(1, [edge(S, 2)]), sp(2)]));
+  assert.match(html, /independent of each other and can merge in any order or at the same time/);
+  assert.match(html, /a band that wraps onto several rows is still one single rank, not several/);
+  assert.match(html, /Order exists only between bands/);
+});
+
+console.log('the text fallback does not imply an order either');
+await t('the list says outright that it is not a running order', () => {
+  const html = page(buildGraph([sp(1, [edge(S, 2)]), sp(2), sp(3)]));
+  assert.match(html, /The list below is not a running order\./);
+  assert.match(html, /listed by number, not in merge order/);
+  assert.match(html, /everything sharing one rank is independent of everything else in\s*that rank/);
+});
+
+await t('EVERY row carries its rank and how many PRs share it', () => {
+  const g = buildGraph([sp(1, [edge(S, 2)]), sp(2), sp(3), sp(4)]);
+  const html = page(g);
+  // three at rank 0 (#2 #3 #4), one at rank 1 (#1)
+  assert.equal(occurrences(html, 'rank 1 of 2 · any order among the 3 in it'), 3);
+  assert.equal(occurrences(html, 'rank 2 of 2 · the only PR in it'), 1);
+  assert.equal(occurrences(html, 'class="badge step"'), g.nodes.length + 2, 'one per row, plus the two in the explainer');
+});
+
+await t("a referenced PR that is not mine keeps its owner badge AND gains its rank", () => {
+  const p = sp(2222, [edge('snapshot-labs/sx-monorepo', 2219, { kind: 'stack', author: 'wa0x6e', foreign: true })], 'snapshot-labs/sx-monorepo');
+  const html = page(buildGraph([p]));
+  assert.match(html, /not yours · @wa0x6e/, 'the existing badge survives');
+  assert.match(html, /rank 1 of 2 · the only PR in it/, 'and the referenced node is ranked too');
+});
+
+await t('the text form marks a tangled rank as tangled rather than as unordered', () => {
+  const html = page(buildGraph([sp(1, [edge(S, 1)])]));
+  assert.match(html, /rank 1 of 1 · a cycle links two in it/);
+  assert.doesNotMatch(html, /any order among/);
+});
+
+await t('NEGATIVE: the rank labelling describes, it never instructs', () => {
+  // Same rule that governs sx#2251: the page states facts about the graph and
+  // never tells anybody to merge anything.
+  const html = page(buildGraph([...Array.from({ length: 12 }, (_, i) => sp(i + 1)), sp(2251, [edge(S, 1)], 'snapshot-labs/sx-monorepo')]));
+  assert.doesNotMatch(html, /ready to merge|safe to merge|merge it now|merge now|go ahead and merge/i);
+  assert.doesNotMatch(html, /you (can|should) merge/i);
+  assert.match(html, /no prerequisites<\/span>/);
 });
 
 console.log('the page says which way it points, and does it without a runtime');

@@ -34,8 +34,9 @@ underneath, where every PR appears under its own repo — once.
 
 A dependency graph is ambiguous without a label, so the direction is stated in the page title, in
 the `<h1>`, in a banner at the top, in the figure caption, on the rank labels down the left edge of
-the diagram (`MERGES FIRST` / `MERGES LAST`), under every repo heading, in the legend, in the
-footer, and on every individual edge in the list (`needs first` one way, `needed by` the other).
+the diagram (`MERGES FIRST` / `MERGES LAST`), on the `then` marker in each gap between ranks, under
+every repo heading, in the legend, in the footer, and on every individual edge in the list
+(`needs first` one way, `needed by` the other).
 
 ## How the diagram is drawn
 
@@ -50,6 +51,31 @@ barycentre of the prerequisites already placed below them; a rank wider than fiv
 grid, with the nodes that have an arrow leaving them on the row nearest the rank above. Two arrows
 arriving at the same box are fanned apart, because two arrowheads on one pixel read as one arrow —
 and "two edges into one node" is the fact this page exists to show.
+
+## Within a rank there is no order; between ranks there is
+
+The two facts are drawn as two different things, because for a while they were drawn as the same
+thing. A rank wider than five wraps onto extra rows, and a wrapped row is the same shape as a rank:
+five boxes with a gap above and below. Twenty independent PRs at rank 0 came out as four such rows
+and the picture said "these five, then these five, then these five, then these five" about PRs that
+have no dependency on one another at all. The only thing distinguishing "next row" from "next rank"
+was 12 pixels of whitespace against 54 — a difference a reader has to *measure*.
+
+So a rank is drawn as **one bordered card** enclosing all of its rows, and it states on itself, in
+its own header, that its members are independent: `ANY ORDER · these 20 are independent of each
+other`. Between two cards there is a gap no card covers, carrying an arrow and the word `then`. A
+wrapped row is now visibly inside something; a rank boundary is visibly between two things.
+
+The claim is checked rather than assumed. Two nodes at one rank *cannot* depend on each other — an
+edge forces its head at least one rank above its tail — with one exception: an edge cut to break a
+cycle contributes no depth and can leave both ends on one rank. `rankCensus()` looks for exactly
+that, and a rank carrying one says `CYCLE` instead of claiming an independence it does not have.
+
+The list underneath had the same defect for the same reason: a plain vertical run of PRs reads as a
+running order, and grouping by repo scatters the PRs that share a rank. It now says outright that it
+is not a running order, repeats that under every repo heading, and puts the rank on every single row
+(`∥ rank 1 of 2 · any order among the 20 in it`), so the fact travels with each PR rather than
+living in a legend.
 
 That is three passes and no more. There are three edges on this page today; a crossing minimiser for
 three edges would be a liability, not an asset.
