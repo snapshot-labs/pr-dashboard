@@ -41,6 +41,14 @@ export function classify(prChecks, baseChecks) {
   };
 }
 
+// CI is NOT drawn on a card any more. The cards carry PR titles now, and a CI
+// label is not a dependency and not a merge order -- it was the widest of the
+// labels that had to go to make room. The verdict is still computed and still
+// reaches the page, as one phrase on the card's hover title and nowhere else, so
+// nothing here claims space the graph needs.
+//
+// Wording is unchanged, on purpose: "base is red too" is still not "this PR is
+// fine", which is all the evidence supports.
 export const CI_LABEL = {
   green: 'CI green',
   'base-red': 'red, but base is red too',
@@ -48,35 +56,4 @@ export const CI_LABEL = {
   mixed: 'red: partly its own',
   pending: 'CI running',
   none: 'no checks'
-};
-
-// The short forms the SVG boxes use, where there is room for about 25
-// characters. Same wording, clipped -- never a different claim. "base red too"
-// is still not "this PR is fine".
-export const CI_SHORT = {
-  green: 'CI green',
-  'base-red': 'base is red too',
-  'own-red': 'red on its own',
-  mixed: 'red: partly its own',
-  pending: 'CI running',
-  none: 'no checks'
-};
-
-// Status roles are reserved, and every one of them ships a glyph and a word --
-// never colour on its own, in the SVG or in the HTML.
-export const CI_ROLE = {
-  green: 'good',
-  'base-red': 'warning',
-  'own-red': 'critical',
-  mixed: 'serious',
-  pending: 'muted',
-  none: 'muted'
-};
-export const CI_GLYPH = {
-  green: '✓',
-  'base-red': '~',
-  'own-red': '✗',
-  mixed: '!',
-  pending: '·',
-  none: '·'
 };

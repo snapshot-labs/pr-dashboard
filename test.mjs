@@ -11,7 +11,20 @@ import {
   isMineFor,
   resolveStatus
 } from './build.mjs';
-import { columnLabel, layoutGraph, NODE_H, NODE_W, rankCensus, RANK_GAP } from './src/graph.mjs';
+import {
+  cardOf,
+  columnLabel,
+  graphDesc,
+  layoutGraph,
+  NODE_H,
+  NODE_W,
+  rankCensus,
+  RANK_GAP,
+  shortRef,
+  splitHold,
+  textWidth,
+  wrapText
+} from './src/graph.mjs';
 import { render } from './src/render.mjs';
 import { getPr } from './src/github.mjs';
 
@@ -229,7 +242,6 @@ const edge = (repo, number, over = {}) => ({
 const page = graph =>
   render({
     graph,
-    groups: groupNodes(graph),
     author: 'tony8713',
     org: 'snapshot-labs',
     generatedAt: '2026-01-01T00:00:00Z',
@@ -246,10 +258,11 @@ await t('a PR that two of mine need is ONE node with two edges leaving it', () =
   assert.deepEqual(neededBy(at(g, `${S}#3`)), [`${S}#1`, `${S}#2`], 'two edges leave it');
   assert.deepEqual(duplicateNodes(g), []);
 });
-await t('...and it is drawn exactly once in the HTML, with no "also drawn" footnote', () => {
+await t('...and it is drawn exactly once, with no "also drawn" footnote', () => {
   const html = page(buildGraph([sp(1, [edge(S, 3)]), sp(2, [edge(S, 3)]), sp(3)]));
-  assert.equal(occurrences(html, '>#3</a>'), 3, 'once as itself, once on each edge that names it');
-  assert.equal(occurrences(html, 'class="num" href="https://github.com/snapshot-labs/stamp/pull/3">#3</a>'), 3);
+  assert.equal(occurrences(html, '<text class="ref" '), 3, 'three cards, one per PR');
+  assert.equal(occurrences(html, '>stamp#3</text>'), 1, '#3 gets exactly one card');
+  assert.equal(occurrences(html, 'href="https://github.com/snapshot-labs/stamp/pull/3"'), 1);
   assert.doesNotMatch(html, /Also drawn/, 'no duplicate-copy footnote survives');
   assert.doesNotMatch(html, /not \d+ pieces of work/);
   assert.doesNotMatch(html, /class="note repeat"/);
@@ -285,22 +298,29 @@ await t('a cross-repo prerequisite of mine is the SAME node as its own entry', (
   assert.deepEqual(js.mine.map(x => x.number), [1225]);
   assert.deepEqual(js.referenced, [], 'not also a referenced copy');
 });
-await t('...and the HTML has one row for it, plus a LINK to it on the edge', () => {
+await t('...and it has one card of its own, with the release gate marked on its edge', () => {
   const html = page(
     buildGraph([sp(1225, [], JS), sp(491, [edge(JS, 1225, { crossRepo: true, needsRelease: true })])])
   );
-  assert.equal(occurrences(html, '>#1225</a>'), 1, 'one row of its own');
-  assert.equal(occurrences(html, '>snapshot-labs/snapshot.js#1225</a>'), 1, 'named once on the edge');
-  assert.match(html, /release-gated/);
+  assert.equal(occurrences(html, '>snapshot.js#1225</text>'), 1, 'one card of its own');
+  assert.equal(occurrences(html, 'href="https://github.com/snapshot-labs/snapshot.js/pull/1225"'), 1);
+  assert.match(html, />GATED<\/text>/, 'the gate is compacted to one word on the edge');
+  assert.match(
+    html,
+    /release-gated: satisfied by a published release, not by a merge/,
+    'and spelled out in full on the edge title and in the legend'
+  );
+  assert.match(html, /release-gated: a published release, not just a merge/, 'legend entry');
 });
-await t('every node in the graph appears exactly once as a row of its own', () => {
+await t('every node in the graph appears exactly once as a card of its own', () => {
   const g = buildGraph([sp(1, [edge(S, 3)]), sp(2, [edge(S, 3)]), sp(3), sp(1225, [], JS)]);
   const html = page(g);
+  assert.equal(occurrences(html, '<g class="node '), g.nodes.length);
   for (const n of g.nodes) {
     assert.equal(
-      occurrences(html, `<div class="line1"><a class="num" href="${n.url}">#${n.number}</a>`),
+      occurrences(html, `>${shortRef(n.repo, n.number)}</text>`),
       1,
-      `${n.key} has one row`
+      `${n.key} has one card`
     );
   }
 });
@@ -327,11 +347,15 @@ await t('a dependency cycle is broken and flagged instead of recursing forever',
   assert.equal(back[0].from.key, `${S}#2`);
   assert.equal(back[0].to.key, `${S}#3`);
   assert.ok(g.nodes.every(n => typeof n.rank === 'number'), 'ranking terminated');
-  assert.match(page(g), /in a dependency cycle/);
+  assert.match(page(g), /<strong>1 declared dependency closes a cycle<\/strong>/);
 });
-await t('a cut edge is still LISTED, so the declaration is not silently dropped', () => {
+await t('a cut edge is still NAMED, so the declaration is not silently dropped', () => {
+  // The list used to be where a cut edge was written out. With the list gone it
+  // gets a notice of its own, and a sentence in the SVG's text alternative.
   const html = page(buildGraph([sp(1, [edge(S, 2)]), sp(2, [edge(S, 3)]), sp(3, [edge(S, 2)])]));
-  assert.match(html, /cycle — not drawn/);
+  assert.match(html, /cannot be drawn as an arrow, so it is named here instead/);
+  assert.match(html, /Nothing declared is dropped\./);
+  assert.match(html, /1 declared dependency closes a cycle and cannot be drawn, but it is not dropped/);
 });
 
 console.log('layered layout, left to right');
@@ -373,7 +397,8 @@ await t('a rank of any size is ONE column and is never folded into two', () => {
   assert.equal(layout.width, layout.left + NODE_W + 10, 'one rank deep is one column wide');
   const sorted = [...g.nodes].sort((a, b) => a.y - b.y);
   for (let i = 1; i < sorted.length; i++) {
-    assert.ok(sorted[i].y >= sorted[i - 1].y + NODE_H, 'no two boxes overlap');
+    assert.ok(sorted[i].y >= sorted[i - 1].y + sorted[i - 1].h, 'no two cards overlap');
+    assert.ok(sorted[i - 1].h >= NODE_H, 'and no card is shorter than the minimum');
   }
 });
 await t('a deep graph gets WIDE rather than scaled down', () => {
@@ -554,53 +579,91 @@ await t('NEGATIVE: "any order" is not claimed for a rank a cut cycle edge lands 
   assert.equal(rankCensus(g).unordered(0), false, 'a self-edge tangles its rank');
   const html = page(g);
   assert.doesNotMatch(html, /any order among/);
-  assert.match(html, /rank 1 of 1 · a cycle sits inside it/);
   assert.match(html, /1 PR · a cycle is cut here/, 'and never "links two" about one PR');
 });
-console.log('the text fallback does not imply an order either');
-await t('the list says outright that it is not a running order', () => {
-  const html = page(buildGraph([sp(1, [edge(S, 2)]), sp(2), sp(3)]));
-  assert.match(html, /The list below is not a running order\./);
-  assert.match(html, /listed by number, not in merge order/);
-  assert.match(html, /everything sharing one\s*rank is independent of everything else in that rank/);
-  assert.match(html, /rank <em>n<\/em> is the\s*<em>n<\/em>th column from the left/);
-});
-await t('EVERY row carries its rank and how many PRs share it', () => {
+await t('the column header is the ONLY place a rank is stated, and it states the count', () => {
+  // It used to be stated twice: on the column header AND as a badge on every row
+  // of the list. The list is gone, so the header carries it alone.
   const g = buildGraph([sp(1, [edge(S, 2)]), sp(2), sp(3), sp(4)]);
   const html = page(g);
-  // three at rank 0 (#2 #3 #4), one at rank 1 (#1)
-  assert.equal(occurrences(html, 'rank 1 of 2 · any order among the 3 in it'), 3);
-  assert.equal(occurrences(html, 'rank 2 of 2 · the only PR in it'), 1);
-  assert.equal(
-    occurrences(html, 'class="badge step"'),
-    g.nodes.length + 2,
-    'one per row, plus the two samples in the notice'
+  assert.match(html, /<text class="rknote" [^>]*>3 PRs · any order<\/text>/);
+  assert.match(html, /<text class="rknote" [^>]*>1 PR<\/text>/);
+  assert.equal(occurrences(html, 'class="rknote'), 2, 'one note per column, not one per PR');
+  assert.doesNotMatch(html, /class="badge step"/, 'the per-card rank badge is gone');
+  assert.doesNotMatch(html, /rank \d+ of \d+/, 'and nothing repeats a rank per PR');
+});
+await t('a tangled rank is still marked as tangled rather than as unordered', () => {
+  const html = page(buildGraph([sp(1, [edge(S, 1)])]));
+  assert.match(html, /<text class="rknote cyc" [^>]*>1 PR · a cycle is cut here<\/text>/);
+  assert.doesNotMatch(
+    html,
+    /<text class="rknote[^"]*" [^>]*>[^<]*any order/,
+    'no column claims an order it does not have'
   );
 });
-await t("a referenced PR that is not mine keeps its owner badge AND gains its rank", () => {
-  const p = sp(2222, [edge('snapshot-labs/sx-monorepo', 2219, { kind: 'stack', author: 'wa0x6e', foreign: true })], 'snapshot-labs/sx-monorepo');
-  const html = page(buildGraph([p]));
-  assert.match(html, /not yours · @wa0x6e/, 'the existing badge survives');
-  assert.match(html, /rank 1 of 2 · the only PR in it/, 'and the referenced node is ranked too');
-});
-await t('the text form marks a tangled rank as tangled rather than as unordered', () => {
-  const html = page(buildGraph([sp(1, [edge(S, 1)])]));
-  assert.match(html, /rank 1 of 1 · a cycle sits inside it/);
-  assert.doesNotMatch(html, /any order among/);
-});
-await t('NEGATIVE: the rank labelling describes, it never instructs', () => {
-  // Same rule that governs sx#2251: the page states facts about the graph and
-  // never tells anybody to merge anything.
-  const html = page(buildGraph([...Array.from({ length: 12 }, (_, i) => sp(i + 1)), sp(2251, [edge(S, 1)], 'snapshot-labs/sx-monorepo')]));
+await t('NEGATIVE: the page describes the graph, it never instructs anybody to merge', () => {
+  const html = page(
+    buildGraph([
+      ...Array.from({ length: 12 }, (_, i) => sp(i + 1)),
+      sp(2251, [edge(S, 1)], 'snapshot-labs/sx-monorepo')
+    ])
+  );
   assert.doesNotMatch(html, /ready to merge|safe to merge|merge it now|merge now|go ahead and merge/i);
   assert.doesNotMatch(html, /you (can|should) merge/i);
-  assert.match(html, /no prerequisites<\/span>/);
 });
-await t('...and it still says so when there is only one rank', () => {
+await t('...and a single-rank graph says there is no order to keep at all', () => {
   const html = page(buildGraph([sp(1), sp(2)]));
-  assert.match(html, /rank 1 of 1 · any order among the 2 in it/);
-  assert.match(html, /nothing waits on anything, so everything on this\s*page is independent/);
-  assert.doesNotMatch(html, /rank 1 of 1<\/span> merges\s*before/);
+  assert.match(html, /<text class="rk" [^>]*>NO ORDER TO KEEP<\/text>/);
+  assert.match(html, /<text class="rksub" [^>]*>nothing waits on anything<\/text>/);
+  assert.match(html, /<text class="rknote" [^>]*>2 PRs · any order<\/text>/);
+  assert.match(
+    html,
+    /There are no dependency edges: nothing on this page waits on anything else on it\./,
+    'and the text alternative says it too'
+  );
+});
+
+console.log('the per-PR list underneath is gone');
+await t('there is no per-PR listing under the drawing any more', () => {
+  const g = buildGraph([
+    sp(491, [edge(S, 504), edge(JS, 1225, { crossRepo: true, needsRelease: true })]),
+    sp(504),
+    sp(1225, [], JS)
+  ]);
+  const html = page(g);
+  assert.doesNotMatch(html, /<ul class="tree/, 'no list');
+  assert.doesNotMatch(html, /<div class="pr/, 'no per-PR rows');
+  assert.doesNotMatch(html, /<ul class="edges">/, 'no per-PR edge list');
+  assert.doesNotMatch(html, /<h2/, 'no repo headings');
+  assert.doesNotMatch(html, /class="badge/, 'and none of the badges those rows carried');
+  assert.doesNotMatch(html, /The list below is not a running order/);
+  assert.doesNotMatch(html, /listed by number, not in merge order/);
+  assert.doesNotMatch(html, /referenced only —/);
+  assert.doesNotMatch(html, /class="dir">needed by/);
+});
+await t('the CI wording is off the card face, and survives only as hover text', () => {
+  const red = sp(1453, [], 'snapshot-labs/score-api');
+  red.ci = {
+    state: 'own-red',
+    ownFailures: [{ name: 'test (22) / Test' }],
+    baseFailures: [],
+    pending: [],
+    total: 1,
+    passed: 0,
+    baseRef: 'master'
+  };
+  red.draft = true;
+  const html = page(buildGraph([red]));
+  const onCard = [...html.matchAll(/<text class="(?:ref|ttl|mark)[^"]*"[^>]*>(.*?)<\/text>/g)]
+    .map(m => m[1])
+    .join(' | ');
+  assert.doesNotMatch(onCard, /red on its own|draft|CI/, `card face reads: ${onCard}`);
+  assert.doesNotMatch(html, /also failing on master/, 'and the verbose failure list is gone');
+  assert.match(
+    html,
+    /<title>score-api#1453 — pr 1453 — red on its own — draft/,
+    'the classifier still runs; its verdict is on hover only'
+  );
 });
 
 console.log('the page says which way it points, and does it without a runtime');
@@ -615,8 +678,11 @@ await t('direction is stated in the title, the heading, the banner and the capti
   assert.match(html, /merge the tail before the head/);
   assert.match(html, /<span class="k">left to right<\/span> merge order/);
   assert.match(html, /Merge order runs left to right/, 'and in the footer');
-  assert.match(html, /a prerequisite sits to the left in the graph and merges before the PR that needs it/,
-    'and under every repo heading');
+  assert.match(
+    html,
+    /The graph reads left to right: an arrow runs from a prerequisite rightward/,
+    "and in the SVG's own text alternative"
+  );
   assert.match(html, /MERGES FIRST/);
   assert.match(html, /MERGES LAST/);
 });
@@ -636,14 +702,21 @@ await t('the no-order-within-a-column fact is stated everywhere the direction is
   assert.match(html, /Two PRs in the same column have\s*no order between them/, 'caption');
   assert.match(html, /<span class="k">same column<\/span> one rank — no order between them/, 'legend');
   assert.match(html, /2 PRs · any order/, 'column header in the drawing');
-  assert.match(html, /any order among the 2 in it/, 'and on the rows of the text form');
-  assert.match(html, /Only the horizontal axis carries order\./, 'and in the explainer');
+  assert.match(html, /in any order among themselves/, 'and in the text alternative');
   assert.match(html, /PRs sharing a\s*column have no order between them/, 'and in the footer');
 });
-await t('and on every single edge in the text form, not only in the banner', () => {
-  const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
-  assert.match(html, /needs first<\/span> <a class="num" href="[^"]*\/504">#504<\/a>/);
-  assert.match(html, /class="dir">needed by<\/span> <a class="num" href="[^"]*\/491">#491<\/a>/);
+await t('and on every single edge in the drawing, not only in the banner', () => {
+  // The direction used to be spelled out on every row of the list. It is now on
+  // every edge of the drawing instead, as that edge's own title.
+  const g = buildGraph([sp(491, [edge(S, 504)]), sp(504)]);
+  const html = page(g);
+  assert.equal(occurrences(html, '<g class="edgeg"><title>'), g.edges.length);
+  assert.equal(
+    occurrences(html, '<title>stamp#504 → stamp#491 — merge stamp#504 before stamp#491'),
+    1
+  );
+  assert.match(html, /merges after stamp#504/, 'and on the card that waits');
+  assert.match(html, /merges before stamp#491/, 'and on the card that is waited on');
 });
 await t('NO runtime dependency: no script tag, nothing loaded from anywhere', () => {
   const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
@@ -658,45 +731,94 @@ await t('NO runtime dependency: no script tag, nothing loaded from anywhere', ()
     urls.join(' ')
   );
 });
-await t('the SVG carries a text alternative, and the relationships are ALSO written out', () => {
-  const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
+console.log('with the list gone, the SVG is the text alternative');
+await t('role, title and desc survive, and the desc carries the WHOLE structure', () => {
+  const g = buildGraph([
+    sp(491, [edge(S, 504), edge(JS, 1225, { crossRepo: true, needsRelease: true })]),
+    sp(504),
+    sp(1225, [], JS)
+  ]);
+  const html = page(g);
   assert.match(html, /role="img" aria-labelledby="graph-title graph-desc"/);
-  assert.match(html, /<title id="graph-title">Dependency graph: 2 pull requests, 1 dependency edge/);
-  assert.match(html, /<desc id="graph-desc">Each pull request is drawn exactly once/);
-  assert.match(html, /The graph reads left to right/, 'the text alternative states the direction');
+  assert.match(html, /<title id="graph-title">Dependency graph: 3 pull requests, 2 dependency edges/);
+  assert.match(
+    html,
+    /<desc id="graph-desc">Each pull request is drawn exactly once, as a card carrying its repository, its number and its title\./
+  );
   assert.match(html, /stacked in the same column are independent of one another/);
-  assert.match(html, /written out under the repo headings below/);
-  assert.match(html, /also written out in the per-repository list below this diagram/);
-  // the text form stands on its own: the edge is stated in prose-free markup
-  // that needs neither CSS nor SVG to be read
-  assert.match(html, /<ul class="edges">/);
+  // every column, everything standing in it, and every edge -- in words
+  assert.match(
+    html,
+    /Column 1 of 2, which merges first, holds 2 pull requests, in any order among themselves: (snapshot\.js#1225, stamp#504|stamp#504, snapshot\.js#1225)\./
+  );
+  assert.match(html, /Column 2 of 2, which merges last, holds 1 pull request: stamp#491\./);
+  assert.match(
+    html,
+    /stamp#504 before stamp#491; snapshot\.js#1225 before stamp#491, release-gated/
+  );
+  assert.doesNotMatch(html, /written out under the repo headings below/, 'and no longer promises a list');
+  assert.doesNotMatch(html, /also written out in the per-repository list below this diagram/);
 });
-await t("somebody else's PR is badged as such in the HTML and in the SVG box", () => {
+await t('and a <title> on EVERY node and EVERY edge', () => {
+  const g = buildGraph([
+    sp(491, [edge(S, 504), edge(JS, 1225, { crossRepo: true, needsRelease: true })]),
+    sp(504),
+    sp(1225, [], JS)
+  ]);
+  const html = page(g);
+  assert.equal(occurrences(html, '<g class="node '), g.nodes.length);
+  assert.equal(occurrences(html, '<g class="edgeg"><title>'), g.edges.length);
+  for (const n of g.nodes) {
+    assert.equal(
+      occurrences(html, `<title>${shortRef(n.repo, n.number)} — `),
+      1,
+      `${n.key} has exactly one title`
+    );
+  }
+  // one <title> for the svg itself, plus one per node, plus one per edge
+  assert.equal(occurrences(html, '<title'), 1 + g.nodes.length + g.edges.length + 1);
+});
+await t("somebody else's PR is marked ◇ @handle on a dashed card, with a legend entry", () => {
   const p = sp(2222, [edge('snapshot-labs/sx-monorepo', 2219, { kind: 'stack', author: 'wa0x6e', foreign: true })], 'snapshot-labs/sx-monorepo');
   const html = page(buildGraph([p]));
-  assert.match(html, /not yours · @wa0x6e/);
-  assert.match(html, /<tspan class="g">◇<\/tspan> @wa0x6e/);
-  assert.match(html, /referenced only — drawn because something to its right needs it/);
+  assert.match(html, /<tspan class="g">◇<\/tspan> @wa0x6e<\/text>/, 'compacted, but still on the card');
+  assert.match(html, /<g class="node dep">/, 'on a dashed card');
+  assert.match(html, /@wa0x6e — not yours to merge/, 'and the card title says what it means');
+  assert.match(
+    html,
+    /<span class="k">◇ @handle<\/span> whose PR it is, when it is not tony8713's to merge/,
+    'and the legend explains the glyph'
+  );
+  assert.doesNotMatch(html, /not yours · @wa0x6e/, 'the long form is gone');
 });
-await t('a PR with no prerequisites is described, never instructed', () => {
-  // sx#2251 is titled "[DO NOT MERGE until migration is run]" and has no
-  // prerequisites. "no prerequisites" is a fact; "ready to merge" would be advice.
-  const html = page(buildGraph([sp(2251, [], 'snapshot-labs/sx-monorepo')]));
-  assert.match(html, /no prerequisites<\/span>/);
+await t("a title that says DO NOT MERGE is lifted onto its own line, where truncation cannot reach it", () => {
+  // sx#2251. The words are part of the PR's own title, so a long title plus a
+  // narrow card could otherwise cut them off and leave the PR reading as ready.
+  const p = sp(2251, [], 'snapshot-labs/sx-monorepo');
+  p.title =
+    'chore: add alias from aviator-dao.eth to airfox-dao.eth [DO NOT MERGE until migration is run]';
+  const html = page(buildGraph([p]));
+  assert.match(html, /<tspan class="g">⊘<\/tspan> DO NOT MERGE until migration is run<\/text>/);
+  assert.match(html, /class="mark m-critical"/, 'and it is the loudest thing on the card');
+  assert.match(
+    html,
+    /<title>sx-monorepo#2251 — chore: add alias from aviator-dao\.eth to airfox-dao\.eth \[DO NOT MERGE until migration is run\]/,
+    'the title is still whole on hover, brackets and all'
+  );
+  assert.match(html, /<span class="k crit">⊘<\/span> the PR's own title says do not merge/, 'legend');
   assert.doesNotMatch(html, /ready to merge|safe to merge|merge it now|merge now/i);
 });
-await t('CI attribution reaches the page, in words and not only in colour', () => {
-  const red = sp(1453, [], 'snapshot-labs/score-api');
-  red.ci = { state: 'own-red', ownFailures: [{ name: 'test (22) / Test' }], baseFailures: [], pending: [], total: 1, passed: 0, baseRef: 'master' };
-  const base = sp(457);
-  base.ci = { state: 'base-red', ownFailures: [], baseFailures: [{ name: 'Test' }], pending: [], total: 1, passed: 0, baseRef: 'master' };
-  const html = page(buildGraph([red, base]));
-  assert.match(html, /red on its own<\/span> <span class="dim">\(test \(22\) \/ Test\)/);
-  assert.match(html, /red, but base is red too<\/span> <span class="dim">\(Test also failing on master\)/);
-  assert.match(html, /<tspan class="g">✗<\/tspan> red on its own/);
-  assert.match(html, /<tspan class="g">~<\/tspan> base is red too/);
+await t('splitHold lifts a bracketed hold and leaves an unbracketed one in the title', () => {
+  const a = splitHold('chore: alias airfox [DO NOT MERGE until migration is run]');
+  assert.equal(a.title, 'chore: alias airfox');
+  assert.equal(a.hold, 'DO NOT MERGE until migration is run');
+  const b = splitHold('do not merge yet: still testing');
+  assert.equal(b.title, 'do not merge yet: still testing', 'an unbracketed title is left alone');
+  assert.equal(b.hold, 'do not merge yet');
+  assert.equal(splitHold('fix: an ordinary title').hold, null);
+  assert.equal(splitHold(null).hold, null);
 });
-await t('a private dependency target keeps its number and never its repo name', () => {
+await t('a private dependency target keeps its number and never its repo name, href included', () => {
   const p = sp(491, [
     edge('snapshot-labs/a-private-repo', 86, {
       crossRepo: true,
@@ -705,18 +827,17 @@ await t('a private dependency target keeps its number and never its repo name', 
       hidden: true
     })
   ]);
-  const g = buildGraph([p]);
-  const html = page(g);
-  assert.doesNotMatch(html, /a-private-repo#86/, 'the repo name is not printed as a ref');
-  assert.match(html, /private repo — details withheld/);
-  assert.match(html, /private repos — names withheld/, 'it is grouped without naming the repo');
-  assert.match(html, /<text class="ref" [^>]*>#86<\/text>/, 'the SVG box shows the number only');
+  const html = page(buildGraph([p]));
+  assert.doesNotMatch(html, /a-private-repo/, 'the repo name appears NOWHERE, not even in a link');
+  assert.match(html, /<text class="ref" [^>]*>#86<\/text>/, 'the card shows the number only');
+  assert.match(html, /<tspan class="g">◇<\/tspan> private repo<\/text>/);
+  assert.match(html, /title withheld \(private repo\)/);
+  assert.match(html, /#86 before stamp#491/, 'and the text alternative uses the number only');
 });
 await t('the withheld notice keeps its accounting', () => {
   const g = buildGraph([sp(491)]);
   const html = render({
     graph: g,
-    groups: groupNodes(g),
     author: 'tony8713',
     org: 'snapshot-labs',
     generatedAt: '2026-01-01T00:00:00Z',
@@ -725,18 +846,113 @@ await t('the withheld notice keeps its accounting', () => {
   });
   assert.match(html, /<strong>2 PRs withheld\.<\/strong>/);
   assert.match(html, /Neither blocks anything on this page/);
-  assert.match(html, /2 nodes that would have had no edges anyway, not a broken chain/);
+  assert.match(html, /2 cards that would have had no edges anyway, not a broken chain/);
   assert.match(html, /INCLUDE_PRIVATE=true/);
   assert.match(html, /does not pretend the work does not exist/);
 });
-await t('the explainer argues for the graph, and no longer for the tree', () => {
+await t('the graph-versus-tree essay and the CI explainer are gone; the syntax help stays', () => {
   const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
-  assert.match(html, /<summary>Why this is a graph and not a tree<\/summary>/);
-  assert.match(html, /one node, as many edges as the data has/);
-  assert.doesNotMatch(html, /Inverted, <code>#491<\/code> has two/);
-  assert.doesNotMatch(html, /inverting does not make the structure a tree/);
-  assert.doesNotMatch(html, /moves where the duplication lands/);
+  assert.doesNotMatch(html, /<summary>Why this is a graph and not a tree<\/summary>/);
+  assert.doesNotMatch(html, /How the CI column decides/);
   assert.doesNotMatch(html, /read upward from the leaves/);
+  assert.doesNotMatch(html, /Also drawn/);
+  // the one explainer that earns its place: it is how an edge gets onto the page
+  assert.match(html, /<summary>Declaring a prerequisite \(the syntax this page reads\)<\/summary>/);
+  assert.match(html, /Depends on release of snapshot-labs\/snapshot\.js#1225/);
+  assert.match(html, /blockquoted lines are ignored/);
+});
+
+console.log('the card carries the PR title');
+await t('a card is the ref AND the title, wrapped over as many lines as the title needs', () => {
+  const p = sp(1453, [], 'snapshot-labs/score-api');
+  p.title = 'fix: throttle upstream RPC-provider error reporting to stop log amplification';
+  const html = page(buildGraph([p]));
+  assert.match(
+    html,
+    /<text class="ref" [^>]*>score-api#1453<\/text>/,
+    'the ref stays: it is how people refer to these'
+  );
+  const lines = [...html.matchAll(/<text class="ttl"[^>]*>([^<]*)<\/text>/g)].map(m => m[1]);
+  assert.ok(lines.length >= 2, `the title wrapped over ${lines.length} line(s)`);
+  assert.equal(lines.join(' '), p.title, 'and the whole title is on the card, in order');
+});
+await t('a title too long for three lines is cut with an ellipsis and kept whole on hover', () => {
+  const p = sp(1);
+  p.title = `fix(resolvers): ${'a very long clause about resolvers '.repeat(8)}end`;
+  const html = page(buildGraph([p]));
+  const lines = [...html.matchAll(/<text class="ttl"[^>]*>([^<]*)<\/text>/g)].map(m => m[1]);
+  assert.equal(lines.length, 3, 'never more than three lines on a card');
+  assert.match(lines[2], /…$/, 'the cut is marked');
+  assert.ok(html.includes(`<title>stamp#1 — ${p.title} —`), 'the full title survives on hover');
+});
+await t('a card is as tall as its own title, and cards never overlap because of it', () => {
+  const short = sp(1);
+  short.title = 'fix: one';
+  const long = sp(2);
+  long.title =
+    'fix(addressResolvers): keep out-of-range 64-hex values out of the hub batch entirely';
+  const g = buildGraph([short, long]);
+  layoutGraph(g);
+  const a = at(g, `${S}#1`);
+  const b = at(g, `${S}#2`);
+  assert.ok(b.h > a.h, `a longer title makes a taller card (${a.h} vs ${b.h})`);
+  const sorted = [a, b].sort((p, q) => p.y - q.y);
+  assert.ok(sorted[1].y >= sorted[0].y + sorted[0].h, 'and the packing respects it');
+  assert.ok(NODE_W >= 240, 'the card got wider to hold a title, which is the point');
+});
+await t('no line drawn in a card is wider than the card', () => {
+  const titles = [
+    'fix: skip proposal emails for flagged spaces',
+    "fix(ui): Sepolia ENS v2 space creation 'not allowed' (resolver-agnostic controller check)",
+    'MIGRATE ALL THE UPPERCASE THINGS BECAUSE CAPITALS ARE WIDER THAN LOWERCASE ONES',
+    'Update Sepolia ENS subgraph',
+    'chore: add alias from aviator-dao.eth to airfox-dao.eth [DO NOT MERGE until migration is run]'
+  ];
+  const g = buildGraph(
+    titles.map((ttl, i) => {
+      const p = sp(i + 1);
+      p.title = ttl;
+      return p;
+    })
+  );
+  layoutGraph(g);
+  const budget = NODE_W - 20;
+  for (const n of g.nodes) {
+    assert.ok(textWidth(n.card.ref, 10.5, true) <= budget, `ref of ${n.key}`);
+    for (const l of n.card.lines) {
+      assert.ok(textWidth(l, 11) <= budget, `"${l}" is ${Math.round(textWidth(l, 11))}px`);
+    }
+    for (const m of n.card.marks) {
+      assert.ok(textWidth(`${m.glyph} ${m.text}`, 9.5) <= budget, `marker "${m.text}"`);
+    }
+  }
+});
+await t('wrapText breaks on words, hard-breaks a word that cannot fit, and never overruns', () => {
+  const lines = wrapText('alpha beta gamma delta epsilon zeta eta theta', 60, 11, 5);
+  assert.ok(lines.length > 1);
+  for (const l of lines) assert.ok(textWidth(l, 11) <= 60, `"${l}" fits`);
+  const hard = wrapText('supercalifragilisticexpialidocious', 40, 11, 5);
+  assert.ok(hard.length > 1, 'a single unbreakable word is hard-broken rather than overflowing');
+  for (const l of hard) assert.ok(textWidth(l, 11) <= 40, `"${l}" fits`);
+  assert.deepEqual(wrapText('', 60, 11, 3), []);
+});
+await t('a card with no title available says so instead of showing an empty box', () => {
+  const c = cardOf({ kind: 'dep', repo: 'snapshot-labs/stamp', number: 9, title: null });
+  assert.deepEqual(c.lines, ['title unavailable']);
+  assert.equal(c.dim, true);
+  const h = cardOf({ kind: 'dep', repo: 'x/y', number: 9, title: null, hidden: true });
+  assert.deepEqual(h.lines, ['title withheld (private repo)']);
+});
+await t('graphDesc names every node and every edge, one sentence per column', () => {
+  const g = buildGraph([sp(1, [edge(S, 3)]), sp(2, [edge(S, 3)]), sp(3), sp(1225, [], JS)]);
+  layoutGraph(g);
+  const desc = graphDesc(g);
+  const ranks = new Set(g.nodes.map(n => n.rank));
+  assert.equal(occurrences(desc, ' holds '), ranks.size, 'one sentence per column');
+  for (const n of g.nodes) {
+    assert.ok(desc.includes(shortRef(n.repo, n.number)), `${n.key} is named in the description`);
+  }
+  assert.equal(occurrences(desc, ' before '), g.edges.length, 'and every edge, once');
 });
 
 if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) {

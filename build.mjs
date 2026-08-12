@@ -27,8 +27,12 @@
 //
 // The drawing is a layered layout emitted as inline SVG at build time (see
 // src/graph.mjs). No Mermaid, no d3, no CDN, no <script> tag: the page stays a
-// single static file. The same relationships are written out in the per-repo
-// list underneath, which is what the page degrades to without SVG.
+// single static file.
+//
+// A card carries the PR's ref AND ITS TITLE. The per-repo list that used to
+// repeat the whole graph underneath is gone, so the SVG carries the text
+// alternative itself: role="img", a <desc> that writes out every column and
+// every edge in words, and a <title> on every node and every edge.
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import {
@@ -248,7 +252,6 @@ async function main() {
   mkdirSync('dist', { recursive: true });
   const html = render({
     graph,
-    groups,
     author: AUTHOR,
     org: ORG,
     generatedAt: new Date().toISOString(),
@@ -447,11 +450,11 @@ export function duplicateNodes(graph) {
 // A node whose repo name is itself withheld cannot be filed under that name.
 export const WITHHELD_GROUP = '__withheld__';
 
-// The text form of the same graph, grouped by repo: every node lands in exactly
-// one section, my PRs first, then anything referenced there that is not mine.
-// Each entry names its own edges, which is an adjacency list -- so the page is
-// still complete and still says which way the dependencies run with the SVG
-// unrendered.
+// The same graph, grouped by repo. This used to be RENDERED, as a per-PR list
+// under the drawing; that list is gone. It survives as accounting -- it is what
+// the build log reports, and it is what the "only mine are listed as mine" rule
+// is checked against -- so every node still lands in exactly one group, my PRs
+// first, then anything referenced there that is not mine.
 export function groupNodes(graph) {
   const byRepo = new Map();
   const take = (key, label) => {

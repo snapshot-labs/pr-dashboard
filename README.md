@@ -39,21 +39,46 @@ that draws one PR twice — that is what replaced `markRepeats()`.
 
 It is **one page-wide graph**, not one per repo. The edge that forced the rework crosses repos, and
 an arrow between two separate `<svg>` elements needs either client-side code or two hand-tuned
-coordinate systems; on one canvas it is just an arrow. Repo grouping survives in the list
-underneath, where every PR appears under its own repo — once.
+coordinate systems; on one canvas it is just an arrow. Repo grouping survives only as accounting, in
+the build log and in `groupNodes()`; the page itself is the drawing.
 
 A dependency graph is ambiguous without a label, so the direction is stated in the page title, in
 the `<h1>`, in a banner at the top, in the figure caption, on the column headers along the top of
-the diagram (`MERGES FIRST` at the left end, `MERGES LAST` at the right end), under every repo
-heading, in the legend, in the footer, and on every individual edge in the list (`needs first` one
-way, `needed by` the other).
+the diagram (`MERGES FIRST` at the left end, `MERGES LAST` at the right end), in the legend, in the
+footer, in the SVG's `<desc>`, and on every individual edge as that edge's own `<title>`
+(`stamp#504 → stamp#491 — merge stamp#504 before stamp#491 — …`).
 
 The *absence* of order is labelled just as hard, because it is the half a reader invents when nobody
-says otherwise: each column header carries `N PRs · any order`, the banner and the caption and the
-legend all say that a column has no order inside it, and — since the text form is a vertical list
-and a vertical list looks like a sequence — every row of it carries a `rank n of m · any order among
-the k in it` badge, under a notice saying the list is sorted by repo and number and is not a running
-order. `rank n` is the nth column from the left.
+says otherwise: each column header carries `N PRs · any order`, and the banner, the caption, the
+legend and the `<desc>` all say that a column has no order inside it. `rank n` is the nth column
+from the left.
+
+## What a card shows
+
+**The repo and number, then the PR title.** The title is the change; a bare `stamp#504` is not
+something anyone recognises, and the point of the picture is to see what merges before what without
+opening twenty tabs. The title wraps over up to three lines and is cut with an `…` past that, and the
+card is as tall as its own title. The ref stays, because it is how people refer to these.
+
+Everything that was a status label is **off the card**: CI wording, `draft`, the rank badge, the
+`no prerequisites` / `blocked ×N` pair. None of them is a dependency or a merge order, and together
+they were most of the card. Three markers survive, each with a legend entry under the drawing,
+because each one changes *whether or when* something can merge:
+
+| Marker | Where | Means |
+|---|---|---|
+| `◇ @handle` | on a card | not `PR_AUTHOR`'s PR, so not theirs to merge |
+| `⊘ …` | on a card | the PR's **own title** says do not merge |
+| `GATED` | on an **edge** | release-gated: a published release clears it, a merge does not |
+
+`⊘` is lifted *out* of the title (`splitHold()`), so a long title can never truncate a
+`[DO NOT MERGE until migration is run]` away and leave the PR reading as ready. The bracket is still
+whole in the card's hover title.
+
+Text is fitted to the card without a browser, so the widths in `textWidth()` are **measured**: every
+printable character was rendered headless in the page's own font stack, its advance divided out, and
+each bucket rounded up by five to eight per cent. The measuring face is DejaVu Sans, one of the
+widest common UI sans faces, so a narrower one elsewhere only leaves spare padding.
 
 The `any order` claim is checked rather than assumed. Two PRs at one rank cannot have a drawn edge
 between them, because a drawn edge always pushes its head into a later rank — but the edge that gets
@@ -75,11 +100,11 @@ boxes overlapping — so a column is as tall as it needs to be and is never spli
 at the same box are fanned apart across its left edge, because two arrowheads on one pixel read as
 one arrow — and "two edges into one node" is the fact this page exists to show.
 
-Neither axis is capped. The canvas is one 150px column per rank with a 96px arrow gap between
-columns, and as tall as its biggest rank needs; 
-`.gwrap` scrolls it sideways; the SVG carries an explicit pixel width and `max-width:none`, so it is
-never scaled to fit a narrow screen. Shrinking 10.5px refs to fit a phone would cost the page the
-thing it is for; the adjacency list below is the small-screen answer.
+Neither axis is capped. The canvas is one 270px column per rank with a 96px arrow gap between
+columns, and as tall as its biggest rank needs — where a rank's height is now the sum of its cards'
+*own* heights, because a card is as tall as its title. `.gwrap` scrolls it sideways; the SVG carries
+an explicit pixel width and `max-width:none`, so it is never scaled to fit a narrow screen.
+Shrinking 11px titles to fit a phone would cost the page the thing it is for.
 
 ## Within a rank there is no order; between ranks there is
 
@@ -103,32 +128,37 @@ to break a cycle contributes no depth and can leave both ends on one rank. `rank
 exactly that, and a column carrying one says `a cycle is cut here` instead of claiming an
 independence it does not have.
 
-The list underneath has the same defect for the same reason, and no rotation can fix it: a plain
-vertical run of PRs reads as a running order, and grouping by repo scatters the PRs that share a
-rank. So it says outright that it is not a running order, repeats that under every repo heading, and
-puts the rank on every single row (`∥ rank 1 of 2 · any order among the 20 in it`), so the fact
-travels with each PR rather than living in a legend.
-
 That is three passes and no more. There are three edges on this page today; a crossing minimiser for
 three edges would be a liability, not an asset.
 
 `A needs B needs A` is broken by marking the edge that closes the cycle: it contributes no depth and
-is not drawn, the nodes are badged `in a dependency cycle`, and the edge is still **listed** as
-`cycle — not drawn` so the declaration is not silently swallowed.
+is not drawn. It is still **named** — in a notice under the drawing and in the SVG's `<desc>` — so a
+declaration somebody wrote in a PR body is never silently swallowed just because it cannot be drawn.
 
-## Accessibility
+## Accessibility, and what removing the list cost
 
-An SVG cannot degrade the way a `<ul>` does, so the page does not rely on it. **Every relationship
-in the diagram is also written out** under the repo headings as an adjacency list: each PR appears
-once, and each of its edges is named on it in both directions (`needs first` in, `needed by` out),
-with the status, the release gate and the reason. With the stylesheet off, or with the SVG not
-rendering at all, the dependency information is fully intact — including the rank badge, which is
-how the list carries the "no order inside a rank" fact that the columns carry in the drawing.
+The page used to carry a second, complete copy of the graph underneath: a per-repo list where every
+PR appeared once with each of its edges named on it in both directions. That list is **gone**, at
+Wan's direction — the page is for dependencies and merge order, and the list was neither.
 
-Inside the diagram the `<svg>` carries `role="img"` plus a `<title>` and `<desc>` naming the
-direction and pointing at the list; each box carries a `<title>` with the PR's full title. Nothing
-is encoded by colour or line style alone: every box states its status in words next to its glyph,
-and the dashed outline on somebody else's PR always arrives with the `◇ @handle` that explains it.
+It was also the page's text fallback, so this is a real loss and worth stating exactly.
+
+**What survives.** The `<svg>` carries `role="img"` with `aria-labelledby`, a `<title>`, and a
+`<desc>` that is no longer a summary of the picture but the picture *in words*: every column, which
+PRs stand in it, that they are in any order among themselves, and every edge written prerequisite
+first (`stamp#504 before stamp#491`), including release gates and including edges cut to break a
+cycle. Every node and every edge additionally carries a `<title>` of its own — the node's one gives
+the full untruncated PR title, its CI verdict, and the edges it sits on in both directions. Nothing
+is encoded by colour or line style alone: each marker ships a glyph plus words, and the dashed
+outline on somebody else's card always arrives with the `◇ @handle` that explains it.
+
+**What is genuinely lost.** With `role="img"` a screen reader treats the SVG as one atomic image and
+announces the `<title>` and `<desc>` only — the per-node and per-edge `<title>`s are *not* exposed as
+a tree, so they are hover text and view-source, not an assistive-technology structure. The `<desc>`
+is therefore one long paragraph where there used to be headings, list semantics and per-PR
+navigation. And the links are gone from the fallback: with the SVG unrendered there is no longer a
+clickable list of PRs, only the `<a>` elements inside the drawing. The dependency *information* is
+still complete and still reachable without seeing the picture; its *navigability* is worse.
 
 ## Where it is deployed
 
@@ -142,12 +172,11 @@ change, and Pages can then be turned off or left as a mirror.
 
 ## Whose PRs are on it
 
-**Every PR listed under a repo heading is by `PR_AUTHOR`. Somebody else's PR is never one of them.**
+**Every card without a `◇` marker is a PR by `PR_AUTHOR`. Somebody else's PR is never one of them.**
 
 Somebody else's PR earns a place in exactly one way: one of yours depends on it. Then it is drawn as
-the **target of that edge**, labelled `◇ not yours · @handle`, listed apart from yours under
-`referenced only`, and never counted in the repo's open count. A PR by another author that nothing
-of yours points at is not drawn at all.
+the **target of that edge**, on a dashed card marked `◇ @handle`, and never counted in the open
+count. A PR by another author that nothing of yours points at is not drawn at all.
 
 The reason it is not simply filtered out: `sx-monorepo#2222` is branched off `#2219`, which is
 wa0x6e's. Dropping `#2219` would hide why `#2222` cannot merge, so it stays — one arrow into
@@ -175,27 +204,30 @@ matters — it is where somebody looking at the graph will go. In short, three k
 `Depends on release of …` is satisfied only when the target PR is merged **and** a non-draft
 release of that repo was published afterwards — merging alone does not clear it.
 
-A trailing `—`, `-` or `:` adds a reason, which is rendered on the edge it explains.
+A trailing `—`, `-` or `:` adds a reason, which appears in the hover title of the edge it explains.
 
 **Nothing is inferred.** An edge exists because somebody wrote it. To keep prose from becoming
 an edge, a declaration must start its line (a leading `-` bullet is allowed), and lines inside
 fenced code blocks or blockquotes are ignored — so quoting another PR body, or a GitHub
 `[!IMPORTANT]` callout, never declares anything.
 
-## The CI column
+## CI
 
-For each failing check on the PR head, the same-named check is looked up on the tip of the base
-branch. Failing on both sides reads *red, but base is red too*; failing only on the PR reads
-*red on its own*; a mix reads *red: partly its own*.
+**CI is not drawn on a card.** It is not a dependency and not a merge order, and the wording was the
+widest of the labels that had to go to make room for titles. It is still computed, and it reaches the
+page as one phrase in the card's hover title — nowhere else.
 
-That is attribution by check name, not proof the two failures are the same failure. The badge
-deliberately says "base is red too" and not "this PR is fine".
+The attribution is unchanged: for each failing check on the PR head, the same-named check is looked
+up on the tip of the base branch. Failing on both sides reads *red, but base is red too*; failing
+only on the PR reads *red on its own*; a mix reads *red: partly its own*. That is attribution by
+check name, not proof the two failures are the same failure — which is why it says "base is red too"
+and not "this PR is fine".
 
 ## Running it
 
 ```sh
 GH_TOKEN=$(gh auth token) node build.mjs   # writes dist/index.html
-GH_TOKEN=$(gh auth token) node test.mjs    # 70 tests
+GH_TOKEN=$(gh auth token) node test.mjs    # 88 tests
 python3 -m http.server -d dist             # look at it
 ```
 
@@ -216,14 +248,14 @@ The count measures what privacy is hiding and nothing else, so it counts only PR
 otherwise have drawn**: yours, plus anybody's that something visible depends on. A private PR that
 the only-yours-are-yours rule would prune anyway is not counted as withheld — calling it withheld
 would overstate the loss. The notice also says how many of them block a PR shown on the page,
-because a withheld PR that blocks nothing costs the graph a node with no edges rather than a broken
+because a withheld PR that blocks nothing costs the graph a card with no edges rather than a broken
 chain. Today that is **2 withheld, 0 blocking**.
 
 The page never names the private repos. The dependency renderer applies the same rule: a dependency
-whose target lives in a private repo keeps its number and link but drops its title and author on a
-public build, and — since the graph is page-wide and every other box is labelled `repo#number` — it
-is drawn as a bare `#number` and grouped under `private repos — names withheld`, so the repo name
-never reaches the page as a ref.
+whose target lives in a private repo keeps its number but drops its title and author on a public
+build, and — since the graph is page-wide and every other card is labelled `repo#number` — it is
+drawn as a bare `#number`, in the `<desc>` too. It is also the one card that is **not a link**: the
+`html_url` carries the repo name that the rest of the card is careful not to print.
 
 ## Tokens
 
