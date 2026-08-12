@@ -2,7 +2,16 @@
 import assert from 'node:assert/strict';
 import { parseDeclarations } from './src/declarations.mjs';
 import { classify } from './src/ci.mjs';
-import { accountWithheld, buildGroups, decorateEdge, isMineFor, resolveStatus } from './build.mjs';
+import {
+  accountWithheld,
+  buildGraph,
+  decorateEdge,
+  duplicateNodes,
+  groupNodes,
+  isMineFor,
+  resolveStatus
+} from './build.mjs';
+import { layoutGraph, NODE_H } from './src/graph.mjs';
 import { render } from './src/render.mjs';
 import { getPr } from './src/github.mjs';
 
@@ -85,14 +94,16 @@ await t('still running -> pending', () => {
   assert.equal(classify([{ name: 'Test', status: 'in_progress' }], []).state, 'pending');
 });
 
-// buildGroups now returns node OBJECTS -- roots are nodes, children are nodes --
-// because the inverted tree needs per-copy state (which edge placed a node,
-// whether it is a repeat) that a bare number cannot carry.
-const nums = roots => roots.map(r => r.number);
-const kids = n => n.children.map(c => c.key);
-const find = (n, key) => (n.key === key ? n : n.children.map(c => find(c, key)).find(Boolean));
+// buildGraph returns nodes and edges, not a nested forest: `needs` are the edges
+// arriving from a node's prerequisites, `neededBy` the edges leaving it toward
+// the PRs that wait on it. A node is reachable by its key, once, from anywhere.
+const at = (graph, key) => graph.byKey.get(key);
+const needs = n => n.needs.map(e => e.from.key);
+const neededBy = n => n.neededBy.map(e => e.to.key);
+const copies = (graph, key) => graph.nodes.filter(n => n.key === key).length;
+const occurrences = (haystack, needle) => haystack.split(needle).length - 1;
 
-console.log('roots are mine');
+console.log('only my PRs are listed as mine');
 const mine = isMineFor('tony8713');
 const pr = (number, author, deps = []) => ({
   repo: 'snapshot-labs/sx-monorepo',
@@ -106,45 +117,38 @@ const pr = (number, author, deps = []) => ({
   }))
 });
 
-await t('a PR by another author is never a root', () => {
+await t('a PR by another author is never listed as one of mine', () => {
   // The shape of today's data: #2222 is mine and sits on wa0x6e's #2219.
-  const g = buildGroups([pr(2222, 'tony8713', [2219]), pr(2219, 'wa0x6e')], mine);
-  assert.deepEqual(nums(g[0].roots), [2222]);
+  const g = buildGraph([pr(2222, 'tony8713', [2219]), pr(2219, 'wa0x6e')], mine);
+  const [group] = groupNodes(g);
+  assert.deepEqual(group.mine.map(n => n.number), [2222]);
+  assert.deepEqual(group.referenced.map(n => n.number), [2219]);
   assert.deepEqual(g.pruned, ['snapshot-labs/sx-monorepo#2219']);
 });
-await t('...it is a marked LEAF beneath mine, and counts as none of my PRs', () => {
-  // Inverted, a prerequisite is a child, so #2219 IS drawn -- underneath
-  // #2222, flagged as somebody else's. What it must never be is a root.
-  // The edge carries what decorateEdge() puts on it in the real build.
+await t('...it is the TARGET of my edge, marked, and waits on nothing itself', () => {
   const p2222 = pr(2222, 'tony8713', [2219]);
   Object.assign(p2222.deps[0], { kind: 'stack', author: 'wa0x6e', foreign: true });
-  const g = buildGroups([p2222, pr(2219, 'wa0x6e')], mine);
-  const child = g[0].roots[0].children[0];
-  assert.equal(child.number, 2219);
-  assert.equal(child.kind, 'dep');
-  assert.equal(child.foreign, true);
-  assert.equal(child.children.length, 0, 'a foreign leaf heads no subtree');
-  assert.equal(g[0].count, 1, 'only #2222 counts as one of mine');
+  const g = buildGraph([p2222, pr(2219, 'wa0x6e')], mine);
+  const n = at(g, 'snapshot-labs/sx-monorepo#2219');
+  assert.equal(n.kind, 'dep');
+  assert.equal(n.foreign, true);
+  assert.deepEqual(neededBy(n), ['snapshot-labs/sx-monorepo#2222']);
+  assert.deepEqual(needs(n), [], 'a referenced PR heads no chain of its own');
+  assert.equal(groupNodes(g)[0].count, 1, 'only #2222 counts as one of mine');
 });
 await t('the dependency on it survives -- it is not filtered away', () => {
   const p = pr(2222, 'tony8713', [2219]);
-  buildGroups([p, pr(2219, 'wa0x6e')], mine);
+  const g = buildGraph([p, pr(2219, 'wa0x6e')], mine);
   assert.equal(p.deps.length, 1);
-  assert.equal(p.deps[0].number, 2219);
+  assert.deepEqual(needs(at(g, 'snapshot-labs/sx-monorepo#2222')), [
+    'snapshot-labs/sx-monorepo#2219'
+  ]);
 });
-await t('a foreign PR nothing of mine depends on is pruned entirely', () => {
-  const g = buildGroups([pr(1, 'tony8713'), pr(999, 'someone-else')], mine);
-  assert.deepEqual(nums(g[0].roots), [1]);
+await t('a foreign PR nothing of mine depends on is absent from the graph entirely', () => {
+  const g = buildGraph([pr(1, 'tony8713'), pr(999, 'someone-else')], mine);
+  assert.deepEqual(g.nodes.map(n => n.number), [1]);
+  assert.equal(at(g, 'snapshot-labs/sx-monorepo#999'), undefined);
   assert.deepEqual(g.pruned, ['snapshot-labs/sx-monorepo#999']);
-});
-await t('INVERTED: my own stack nests #504 under #491, not the other way round', () => {
-  // This is the change. #491 needs #504, so #504 is drawn BENEATH #491 and
-  // merges first; #491 is the root because nothing else waits on it.
-  const stamp = n => ({ ...pr(n, 'tony8713'), repo: 'snapshot-labs/stamp' });
-  const p491 = { ...stamp(491), deps: [{ repo: 'snapshot-labs/stamp', number: 504, crossRepo: false, satisfied: false }] };
-  const g = buildGroups([p491, stamp(504), stamp(457)], mine);
-  assert.deepEqual(nums(g[0].roots), [457, 491], '#504 is no longer a root');
-  assert.deepEqual(kids(g[0].roots[1]), ['snapshot-labs/stamp#504']);
 });
 await t('case-insensitive author match', () => {
   assert.equal(isMineFor('tony8713')('Tony8713'), true);
@@ -195,14 +199,13 @@ await t('a withheld PR by another author that nothing depends on is NOT counted'
   assert.equal(r.count, 0);
 });
 
-
-console.log('inverted tree: prerequisites are CHILDREN');
 const S = 'snapshot-labs/stamp';
-const sp = (number, deps = []) => ({
-  repo: S,
+const JS = 'snapshot-labs/snapshot.js';
+const sp = (number, deps = [], repo = S) => ({
+  repo,
   number,
   title: `pr ${number}`,
-  url: `https://github.com/${S}/pull/${number}`,
+  url: `https://github.com/${repo}/pull/${number}`,
   author: 'tony8713',
   draft: false,
   ci: { state: 'green', ownFailures: [], baseFailures: [], pending: [], total: 0, passed: 0 },
@@ -223,108 +226,265 @@ const edge = (repo, number, over = {}) => ({
   foreign: false,
   ...over
 });
-const page = groups =>
+const page = graph =>
   render({
-    groups,
+    graph,
+    groups: groupNodes(graph),
     author: 'tony8713',
     org: 'snapshot-labs',
     generatedAt: '2026-01-01T00:00:00Z',
     withheld: { count: 0, referenced: 0, blocking: 0 },
-    total: 2
+    total: graph.nodes.filter(n => n.kind === 'own').length
   });
 
-await t('two INDEPENDENT prerequisites become siblings, so no edge is dropped', () => {
-  // The reason for inverting: as ancestors, #491 would need two parents.
-  const [g] = buildGroups([
-    sp(491, [edge(S, 504), edge('snapshot-labs/snapshot.js', 1225, { crossRepo: true, needsRelease: true })]),
+console.log('ONE node per PR, however many edges it is on');
+await t('a PR that two of mine need is ONE node with two edges leaving it', () => {
+  // This is the rework. In the nested list this PR had to be drawn twice, once
+  // under each dependent, with a footnote on each copy naming the other.
+  const g = buildGraph([sp(1, [edge(S, 3)]), sp(2, [edge(S, 3)]), sp(3)]);
+  assert.equal(copies(g, `${S}#3`), 1, 'exactly one node for #3');
+  assert.deepEqual(neededBy(at(g, `${S}#3`)), [`${S}#1`, `${S}#2`], 'two edges leave it');
+  assert.deepEqual(duplicateNodes(g), []);
+});
+await t('...and it is drawn exactly once in the HTML, with no "also drawn" footnote', () => {
+  const html = page(buildGraph([sp(1, [edge(S, 3)]), sp(2, [edge(S, 3)]), sp(3)]));
+  assert.equal(occurrences(html, '>#3</a>'), 3, 'once as itself, once on each edge that names it');
+  assert.equal(occurrences(html, 'class="num" href="https://github.com/snapshot-labs/stamp/pull/3">#3</a>'), 3);
+  assert.doesNotMatch(html, /Also drawn/, 'no duplicate-copy footnote survives');
+  assert.doesNotMatch(html, /not \d+ pieces of work/);
+  assert.doesNotMatch(html, /class="note repeat"/);
+});
+await t('two INDEPENDENT prerequisites both point at the same dependent, no edge dropped', () => {
+  const g = buildGraph([
+    sp(491, [edge(S, 504), edge(JS, 1225, { crossRepo: true, needsRelease: true })]),
     sp(504)
   ]);
-  assert.deepEqual(nums(g.roots), [491]);
-  assert.deepEqual(kids(g.roots[0]), [`${S}#504`, 'snapshot-labs/snapshot.js#1225']);
+  assert.deepEqual(needs(at(g, `${S}#491`)), [`${S}#504`, `${JS}#1225`]);
+  assert.equal(g.edges.length, 2);
 });
 await t('cross-repo prerequisites sort after same-repo ones', () => {
-  const [g] = buildGroups([
-    sp(491, [edge('snapshot-labs/snapshot.js', 1225, { crossRepo: true }), edge(S, 504)]),
+  const g = buildGraph([
+    sp(491, [edge(JS, 1225, { crossRepo: true }), edge(S, 504)]),
     sp(504)
   ]);
-  assert.deepEqual(kids(g.roots[0]), [`${S}#504`, 'snapshot-labs/snapshot.js#1225']);
+  assert.deepEqual(needs(at(g, `${S}#491`)), [`${S}#504`, `${JS}#1225`]);
 });
-await t('a cross-repo prerequisite is a leaf, not expanded into this repo', () => {
-  const groups = buildGroups([
-    { ...sp(1225), repo: 'snapshot-labs/snapshot.js', deps: [edge('snapshot-labs/snapshot.js', 1200)] },
-    { ...sp(1200), repo: 'snapshot-labs/snapshot.js' },
-    sp(491, [edge('snapshot-labs/snapshot.js', 1225, { crossRepo: true })])
+await t('a cross-repo prerequisite of mine is the SAME node as its own entry', () => {
+  // The exact case that forced the rework: snapshot.js#1225 is one of mine AND a
+  // prerequisite of stamp#491. One node, filed under its own repo, with an edge
+  // that crosses the repo boundary.
+  const g = buildGraph([
+    sp(1225, [], JS),
+    sp(491, [edge(JS, 1225, { crossRepo: true, needsRelease: true })])
   ]);
-  const stamp = groups.find(g => g.repo === S);
-  assert.deepEqual(stamp.roots[0].children[0].children, [], 'the leaf carries no subtree');
+  assert.equal(copies(g, `${JS}#1225`), 1);
+  const n = at(g, `${JS}#1225`);
+  assert.equal(n.kind, 'own', 'it is my PR, not a leaf copy of it');
+  assert.deepEqual(neededBy(n), [`${S}#491`]);
+  const js = groupNodes(g).find(gr => gr.repo === JS);
+  assert.deepEqual(js.mine.map(x => x.number), [1225]);
+  assert.deepEqual(js.referenced, [], 'not also a referenced copy');
 });
-
-console.log('the caveat: inverting MOVES duplication, so repeats are marked');
-await t('a PR needed by two of mine is drawn under both, both copies labelled', () => {
-  const [g] = buildGroups([sp(1, [edge(S, 3)]), sp(2, [edge(S, 3)]), sp(3)]);
-  assert.deepEqual(nums(g.roots), [1, 2], '#3 is nobody\'s root');
-  const a = find(g.roots[0], `${S}#3`);
-  const b = find(g.roots[1], `${S}#3`);
-  assert.ok(a && b, 'drawn twice');
-  assert.equal(a.repeat.total, 2);
-  // each copy points at where the OTHER copy is
-  assert.deepEqual(a.repeat.others, ['under stamp#2']);
-  assert.deepEqual(b.repeat.others, ['under stamp#1']);
-  assert.equal(g.repeats, 2);
-});
-await t('NEGATIVE: a PR drawn once carries no repeat note', () => {
-  const [g] = buildGroups([sp(491, [edge(S, 504)]), sp(504)]);
-  assert.equal(find(g.roots[0], `${S}#504`).repeat, undefined);
-});
-await t('mine in another repo: a root there AND a leaf here, both marked', () => {
-  const groups = buildGroups([
-    { ...sp(1225), repo: 'snapshot-labs/snapshot.js' },
-    sp(491, [edge('snapshot-labs/snapshot.js', 1225, { crossRepo: true, needsRelease: true })])
-  ]);
-  const js = groups.find(g => g.repo === 'snapshot-labs/snapshot.js');
-  const stamp = groups.find(g => g.repo === S);
-  assert.deepEqual(js.roots[0].repeat.others, ['under stamp#491']);
-  assert.deepEqual(find(stamp.roots[0], 'snapshot-labs/snapshot.js#1225').repeat.others, [
-    'at the top of snapshot.js'
-  ]);
-});
-
-console.log('degenerate shapes');
-await t('a dependency cycle stops and is flagged instead of recursing forever', () => {
-  const a = sp(1, [edge(S, 2)]);
-  const b = sp(2, [edge(S, 3)]);
-  const c = sp(3, [edge(S, 2)]);
-  const [g] = buildGroups([a, b, c]);
-  const deep = find(g.roots[0], `${S}#3`);
-  assert.ok(deep, '#3 is reached');
-  assert.equal(find(deep, `${S}#2`).cycle, true);
-  assert.deepEqual(find(deep, `${S}#2`).children, []);
-});
-
-console.log('the page says which way it points');
-await t('direction is stated in the title, the heading and on every branch', () => {
-  const html = page(buildGroups([sp(491, [edge(S, 504)]), sp(504)]));
-  assert.match(html, /<title>Merge from the leaves up/);
-  assert.match(html, /<h1>Open PRs — merge from the leaves up<\/h1>/);
-  assert.match(html, /children are its prerequisites/);
-  assert.match(html, /class="downto"/, 'every branch carries a direction label');
-  assert.match(html, /merge this first/);
-  assert.match(html, /read upward from the leaves/);
-});
-await t('#504 is rendered inside #491\'s subtree, not beside it', () => {
-  const html = page(buildGroups([sp(491, [edge(S, 504)]), sp(504)]));
-  const i491 = html.indexOf('>#491<');
-  const idown = html.indexOf('class="downto"', i491);
-  const i504 = html.indexOf('>#504<', i491);
-  assert.ok(i491 < idown && idown < i504, '#504 comes after #491 and after the label');
-});
-await t("somebody else's PR is badged as such in the HTML", () => {
+await t('...and the HTML has one row for it, plus a LINK to it on the edge', () => {
   const html = page(
-    buildGroups([
-      { ...sp(2222), repo: 'snapshot-labs/sx-monorepo', deps: [edge('snapshot-labs/sx-monorepo', 2219, { kind: 'stack', author: 'wa0x6e', foreign: true })] }
-    ])
+    buildGraph([sp(1225, [], JS), sp(491, [edge(JS, 1225, { crossRepo: true, needsRelease: true })])])
   );
+  assert.equal(occurrences(html, '>#1225</a>'), 1, 'one row of its own');
+  assert.equal(occurrences(html, '>snapshot-labs/snapshot.js#1225</a>'), 1, 'named once on the edge');
+  assert.match(html, /release-gated/);
+});
+await t('every node in the graph appears exactly once as a row of its own', () => {
+  const g = buildGraph([sp(1, [edge(S, 3)]), sp(2, [edge(S, 3)]), sp(3), sp(1225, [], JS)]);
+  const html = page(g);
+  for (const n of g.nodes) {
+    assert.equal(
+      occurrences(html, `<div class="line1"><a class="num" href="${n.url}">#${n.number}</a>`),
+      1,
+      `${n.key} has one row`
+    );
+  }
+});
+
+console.log('rank = dependency depth');
+await t('rank 0 is every PR with no prerequisites', () => {
+  const g = buildGraph([sp(491, [edge(S, 504)]), sp(504), sp(457)]);
+  assert.equal(at(g, `${S}#504`).rank, 0);
+  assert.equal(at(g, `${S}#457`).rank, 0);
+  assert.equal(at(g, `${S}#491`).rank, 1);
+});
+await t('rank is the LONGEST prerequisite chain, not the shortest', () => {
+  // #1 needs #2 and #3; #2 needs #3. #1 must not be drawn level with #2.
+  const g = buildGraph([sp(1, [edge(S, 2), edge(S, 3)]), sp(2, [edge(S, 3)]), sp(3)]);
+  assert.deepEqual(
+    [at(g, `${S}#3`).rank, at(g, `${S}#2`).rank, at(g, `${S}#1`).rank],
+    [0, 1, 2]
+  );
+});
+await t('a dependency cycle is broken and flagged instead of recursing forever', () => {
+  const g = buildGraph([sp(1, [edge(S, 2)]), sp(2, [edge(S, 3)]), sp(3, [edge(S, 2)])]);
+  const back = g.edges.filter(e => e.cycle);
+  assert.equal(back.length, 1, 'exactly one edge is cut to break the cycle');
+  assert.equal(back[0].from.key, `${S}#2`);
+  assert.equal(back[0].to.key, `${S}#3`);
+  assert.ok(g.nodes.every(n => typeof n.rank === 'number'), 'ranking terminated');
+  assert.match(page(g), /in a dependency cycle/);
+});
+await t('a cut edge is still LISTED, so the declaration is not silently dropped', () => {
+  const html = page(buildGraph([sp(1, [edge(S, 2)]), sp(2, [edge(S, 3)]), sp(3, [edge(S, 2)])]));
+  assert.match(html, /cycle — not drawn/);
+});
+
+console.log('layered layout, bottom-up');
+await t('rank 0 sits BELOW rank 1 on the canvas', () => {
+  const g = buildGraph([sp(491, [edge(S, 504)]), sp(504)]);
+  g.layout = layoutGraph(g);
+  assert.ok(
+    at(g, `${S}#504`).y > at(g, `${S}#491`).y + NODE_H,
+    'the prerequisite is drawn lower down, so merge order reads upward'
+  );
+});
+await t('a shared prerequisite is centred under the things that wait on it', () => {
+  const g = buildGraph([
+    sp(491, [edge(S, 504), edge(JS, 1225, { crossRepo: true })]),
+    sp(504),
+    sp(1225, [], JS)
+  ]);
+  g.layout = layoutGraph(g);
+  const parent = at(g, `${S}#491`);
+  const kids = [at(g, `${S}#504`), at(g, `${JS}#1225`)];
+  const mid = (kids[0].cx + kids[1].cx) / 2;
+  assert.ok(Math.abs(parent.cx - mid) <= 1, `${parent.cx} vs ${mid}`);
+});
+await t('one <g class="node"> per PR, and one arrow per drawn edge', () => {
+  const g = buildGraph([sp(1, [edge(S, 3)]), sp(2, [edge(S, 3)]), sp(3)]);
+  const html = page(g);
+  assert.equal(occurrences(html, '<g class="node'), g.nodes.length);
+  assert.equal(occurrences(html, 'marker-end="url(#dep-arrow)"'), g.edges.length);
+});
+await t('a rank wider than one row wraps instead of overflowing the canvas', () => {
+  const g = buildGraph(Array.from({ length: 12 }, (_, i) => sp(i + 1)));
+  const layout = layoutGraph(g);
+  assert.equal(layout.maxRank, 0);
+  assert.ok(new Set(g.nodes.map(n => n.row)).size === 3, 'twelve nodes, five per row, three rows');
+  for (const n of g.nodes) {
+    assert.ok(n.x >= layout.left, `${n.key} starts inside the canvas`);
+    assert.ok(n.x + 150 <= layout.left + layout.contentW, `${n.key} ends inside the canvas`);
+  }
+});
+await t('the nodes something waits on land on the row nearest the rank above', () => {
+  const many = Array.from({ length: 11 }, (_, i) => sp(i + 10));
+  const g = buildGraph([...many, sp(1, [edge(S, 15)])]);
+  layoutGraph(g);
+  assert.equal(at(g, `${S}#15`).row, 0, 'the prerequisite is on the top row of its rank');
+});
+
+console.log('the page says which way it points, and does it without a runtime');
+await t('direction is stated in the title, the heading, the banner and the caption', () => {
+  const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
+  assert.match(html, /<title>PR dependency graph — merge from the bottom up/);
+  assert.match(html, /<h1>Open PRs — merge from the bottom up<\/h1>/);
+  assert.match(html, /Read the graph bottom-up\. A PR sits above the things it needs\./);
+  assert.match(html, /from a prerequisite to the PR that waits on it/);
+  assert.match(html, /an arrow runs from a prerequisite up to the PR that waits on\s*it/);
+  assert.match(html, /merge the tail before the head/);
+  assert.match(html, /MERGES FIRST/);
+  assert.match(html, /MERGES LAST/);
+});
+await t('and on every single edge in the text form, not only in the banner', () => {
+  const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
+  assert.match(html, /needs first<\/span> <a class="num" href="[^"]*\/504">#504<\/a>/);
+  assert.match(html, /class="dir">needed by<\/span> <a class="num" href="[^"]*\/491">#491<\/a>/);
+});
+await t('NO runtime dependency: no script tag, nothing loaded from anywhere', () => {
+  const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
+  assert.doesNotMatch(html, /<script/i);
+  assert.doesNotMatch(html, /<(link|img|iframe|object|embed|use)\b/i);
+  assert.doesNotMatch(html, /url\(\s*['"]?https?:/i, 'no CSS fetches anything either');
+  // The only absolute URLs on the page are the PR links and the SVG namespace.
+  // (The prose says the words "Mermaid" and "CDN"; the page does not load them.)
+  const urls = [...html.matchAll(/https?:\/\/[^\s"'<)]+/g)].map(m => m[0]);
+  assert.ok(
+    urls.every(u => u.startsWith('https://github.com/') || u === 'http://www.w3.org/2000/svg'),
+    urls.join(' ')
+  );
+});
+await t('the SVG carries a text alternative, and the relationships are ALSO written out', () => {
+  const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
+  assert.match(html, /role="img" aria-labelledby="graph-title graph-desc"/);
+  assert.match(html, /<title id="graph-title">Dependency graph: 2 pull requests, 1 dependency edge/);
+  assert.match(html, /<desc id="graph-desc">Each pull request is drawn exactly once/);
+  assert.match(html, /written out under the repo headings below/);
+  assert.match(html, /also written out in the per-repository list below this diagram/);
+  // the text form stands on its own: the edge is stated in prose-free markup
+  // that needs neither CSS nor SVG to be read
+  assert.match(html, /<ul class="edges">/);
+});
+await t("somebody else's PR is badged as such in the HTML and in the SVG box", () => {
+  const p = sp(2222, [edge('snapshot-labs/sx-monorepo', 2219, { kind: 'stack', author: 'wa0x6e', foreign: true })], 'snapshot-labs/sx-monorepo');
+  const html = page(buildGraph([p]));
   assert.match(html, /not yours · @wa0x6e/);
+  assert.match(html, /<tspan class="g">◇<\/tspan> @wa0x6e/);
+  assert.match(html, /referenced only — drawn because something above needs it/);
+});
+await t('a PR with no prerequisites is described, never instructed', () => {
+  // sx#2251 is titled "[DO NOT MERGE until migration is run]" and has no
+  // prerequisites. "no prerequisites" is a fact; "ready to merge" would be advice.
+  const html = page(buildGraph([sp(2251, [], 'snapshot-labs/sx-monorepo')]));
+  assert.match(html, /no prerequisites<\/span>/);
+  assert.doesNotMatch(html, /ready to merge|safe to merge|merge it now|merge now/i);
+});
+await t('CI attribution reaches the page, in words and not only in colour', () => {
+  const red = sp(1453, [], 'snapshot-labs/score-api');
+  red.ci = { state: 'own-red', ownFailures: [{ name: 'test (22) / Test' }], baseFailures: [], pending: [], total: 1, passed: 0, baseRef: 'master' };
+  const base = sp(457);
+  base.ci = { state: 'base-red', ownFailures: [], baseFailures: [{ name: 'Test' }], pending: [], total: 1, passed: 0, baseRef: 'master' };
+  const html = page(buildGraph([red, base]));
+  assert.match(html, /red on its own<\/span> <span class="dim">\(test \(22\) \/ Test\)/);
+  assert.match(html, /red, but base is red too<\/span> <span class="dim">\(Test also failing on master\)/);
+  assert.match(html, /<tspan class="g">✗<\/tspan> red on its own/);
+  assert.match(html, /<tspan class="g">~<\/tspan> base is red too/);
+});
+await t('a private dependency target keeps its number and never its repo name', () => {
+  const p = sp(491, [
+    edge('snapshot-labs/a-private-repo', 86, {
+      crossRepo: true,
+      title: null,
+      author: null,
+      hidden: true
+    })
+  ]);
+  const g = buildGraph([p]);
+  const html = page(g);
+  assert.doesNotMatch(html, /a-private-repo#86/, 'the repo name is not printed as a ref');
+  assert.match(html, /private repo — details withheld/);
+  assert.match(html, /private repos — names withheld/, 'it is grouped without naming the repo');
+  assert.match(html, /<text class="ref" [^>]*>#86<\/text>/, 'the SVG box shows the number only');
+});
+await t('the withheld notice keeps its accounting', () => {
+  const g = buildGraph([sp(491)]);
+  const html = render({
+    graph: g,
+    groups: groupNodes(g),
+    author: 'tony8713',
+    org: 'snapshot-labs',
+    generatedAt: '2026-01-01T00:00:00Z',
+    withheld: { count: 2, referenced: 0, blocking: 0 },
+    total: 1
+  });
+  assert.match(html, /<strong>2 PRs withheld\.<\/strong>/);
+  assert.match(html, /Neither blocks anything on this page/);
+  assert.match(html, /2 nodes that would have had no edges anyway, not a broken chain/);
+  assert.match(html, /INCLUDE_PRIVATE=true/);
+  assert.match(html, /does not pretend the work does not exist/);
+});
+await t('the explainer argues for the graph, and no longer for the tree', () => {
+  const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
+  assert.match(html, /<summary>Why this is a graph and not a tree<\/summary>/);
+  assert.match(html, /one node, as many edges as the data has/);
+  assert.doesNotMatch(html, /Inverted, <code>#491<\/code> has two/);
+  assert.doesNotMatch(html, /inverting does not make the structure a tree/);
+  assert.doesNotMatch(html, /moves where the duplication lands/);
+  assert.doesNotMatch(html, /read upward from the leaves/);
 });
 
 if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) {

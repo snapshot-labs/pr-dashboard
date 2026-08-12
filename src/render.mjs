@@ -1,29 +1,5 @@
-import { CI_LABEL } from './ci.mjs';
-
-const esc = s =>
-  String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-
-// Status roles are reserved and always ship glyph + text, never colour alone.
-const CI_ROLE = {
-  green: 'good',
-  'base-red': 'warning',
-  'own-red': 'critical',
-  mixed: 'serious',
-  pending: 'muted',
-  none: 'muted'
-};
-const CI_GLYPH = {
-  green: '✓',
-  'base-red': '~',
-  'own-red': '✗',
-  mixed: '!',
-  pending: '·',
-  none: '·'
-};
+import { CI_GLYPH, CI_LABEL, CI_ROLE } from './ci.mjs';
+import { esc, graphCss, graphSvg, layoutGraph } from './graph.mjs';
 
 function ciBadge(ci) {
   const role = CI_ROLE[ci.state];
@@ -42,11 +18,12 @@ const EDGE_LABEL = {
   implicit: 'needs first'
 };
 
-// The badge for the edge that put this node here. It is drawn on the CHILD,
-// because in this tree the child IS the prerequisite.
+// The badge for one edge. It is drawn on the PR that WAITS, next to the ref of
+// the thing it waits for, so the text form states the direction of every edge
+// individually and not only in the banner.
 function edgeBadge(e) {
   const role = e.satisfied ? 'good' : e.crossRepo ? 'serious' : 'warning';
-  const glyph = e.satisfied ? '\u2713' : '\u2298';
+  const glyph = e.satisfied ? '✓' : '⊘';
   return `<span class="badge ${role}"><span class="g">${glyph}</span>${esc(EDGE_LABEL[e.kind] || 'needs first')}</span>`;
 }
 
@@ -56,108 +33,139 @@ function edgeBadge(e) {
 // an accusation.
 function ownerBadge(n) {
   if (n.kind === 'own') return '';
-  const e = n.edge;
-  if (e.hidden)
-    return '<span class="badge foreign"><span class="g">\u25c7</span>private repo — details withheld</span>';
-  if (e.unreadable || !n.author)
+  if (n.hidden)
+    return '<span class="badge foreign"><span class="g">◇</span>private repo — details withheld</span>';
+  if (!n.author)
     return '<span class="badge foreign"><span class="g">?</span>author unknown</span>';
   if (n.foreign)
-    return `<span class="badge foreign"><span class="g">\u25c7</span>not yours · @${esc(n.author)}</span>`;
+    return `<span class="badge foreign"><span class="g">◇</span>not yours · @${esc(n.author)}</span>`;
   return '';
 }
 
-function node(n) {
-  const e = n.edge;
-  const ref = n.crossRepo ? `${n.repo}#${n.number}` : `#${n.number}`;
+// How a node refers to another node: bare number inside its own repo's section,
+// fully qualified when the edge leaves the repo. A target in a private repo
+// never prints the repo name.
+const refTo = (from, to) =>
+  to.hidden ? `#${to.number}` : to.repo === from.repo ? `#${to.number}` : `${to.repo}#${to.number}`;
+
+// One node, in the text form. This is the whole graph written out as an
+// adjacency list: every PR appears once, and every edge it is on is named on it,
+// with the direction spelled out both ways round ("needs first" in, "needed by"
+// out). It is what the page falls back to when the SVG does not render.
+function nodeRow(n) {
+  const ref = `#${n.number}`;
 
   const badges = [];
-  if (e) {
-    badges.push(edgeBadge(e));
-    badges.push(`<span class="status">${esc(e.status)}</span>`);
-    if (e.needsRelease) badges.push('<span class="gate">release-gated</span>');
-  }
   const owner = ownerBadge(n);
   if (owner) badges.push(owner);
 
   if (n.kind === 'own') {
-    const blockers = n.pr.deps.filter(d => !d.satisfied);
+    const blockers = n.needs.filter(e => !e.edge.satisfied);
     if (n.pr.draft) badges.push('<span class="badge muted"><span class="g">·</span>draft</span>');
     // Deliberately structural, not an instruction: sx#2251 is titled
     // "[DO NOT MERGE until migration is run]" and has no prerequisites on this
-    // page. It must not be told to merge now.
+    // page. "no prerequisites" is a fact about the graph. "ready to merge" would
+    // be advice, and would be wrong.
     badges.push(
       blockers.length === 0
-        ? '<span class="badge good"><span class="g">\u2713</span>nothing beneath it</span>'
-        : `<span class="badge warning"><span class="g">\u2298</span>blocked ×${blockers.length}</span>`
+        ? '<span class="badge good"><span class="g">✓</span>no prerequisites</span>'
+        : `<span class="badge warning"><span class="g">⊘</span>blocked ×${blockers.length}</span>`
     );
     if (n.cycle)
       badges.push(
-        '<span class="badge critical"><span class="g">!</span>cycle — already above this</span>'
+        '<span class="badge critical"><span class="g">!</span>in a dependency cycle</span>'
       );
     badges.push(ciBadge(n.pr.ci));
+  } else {
+    // A referenced PR carries the state of the thing itself, which is what tells
+    // you whether the PRs pointing at it are still blocked.
+    const e = n.neededBy[0];
+    if (e) badges.push(`<span class="status">${esc(e.edge.status)}</span>`);
   }
-
-  const reason = e && e.reason ? `<div class="why">${esc(e.reason)}</div>` : '';
-  const stale =
-    e && e.latestRelease
-      ? `<div class="why">latest release ${esc(e.latestRelease.tag)} predates the merge</div>`
-      : '';
-  // Inverting moved the duplication rather than removing it, so say where the
-  // other copies are instead of letting one PR read as two.
-  const repeat = n.repeat
-    ? `<div class="note repeat">Also drawn ${esc(n.repeat.others.join(' and '))} — one PR drawn
-       ${n.repeat.total} times on this page, not ${n.repeat.total} pieces of work.</div>`
-    : '';
 
   const title = n.title
     ? `<span class="title">${esc(n.title)}</span>`
-    : `<span class="title dim">${e && e.hidden ? 'title withheld (private repo)' : 'title unavailable'}</span>`;
+    : `<span class="title dim">${n.hidden ? 'title withheld (private repo)' : 'title unavailable'}</span>`;
 
-  const kids = n.children;
+  const needs = n.needs
+    .map(e => {
+      const d = e.edge;
+      const bits = [
+        edgeBadge(d),
+        `<a class="num" href="${esc(e.from.url)}">${esc(refTo(n, e.from))}</a>`,
+        `<span class="status">${esc(d.status)}</span>`
+      ];
+      if (d.needsRelease) bits.push('<span class="gate">release-gated</span>');
+      if (e.cycle) bits.push('<span class="badge critical"><span class="g">!</span>cycle — not drawn</span>');
+      const why = d.reason ? `<div class="why">${esc(d.reason)}</div>` : '';
+      const stale = d.latestRelease
+        ? `<div class="why">latest release ${esc(d.latestRelease.tag)} predates the merge</div>`
+        : '';
+      return `<li class="in">${bits.join(' ')}${why}${stale}</li>`;
+    })
+    .join('');
+
+  const out = n.neededBy.length
+    ? `<li class="out"><span class="dir">needed by</span> ${n.neededBy
+        .map(e => `<a class="num" href="${esc(e.to.url)}">${esc(refTo(n, e.to))}</a>`)
+        .join(' ')}</li>`
+    : '';
+
+  const edges = needs || out ? `<ul class="edges">${needs}${out}</ul>` : '';
 
   return `<li>
     <div class="${n.kind === 'own' ? 'pr' : 'pr dep'}">
       <div class="line1"><a class="num" href="${esc(n.url)}">${esc(ref)}</a> ${title}</div>
       <div class="line2">${badges.join(' ')}</div>
-      ${reason}${stale}${repeat}
+      ${edges}
     </div>
-    ${
-      kids.length
-        ? `<div class="downto"><span class="arrow">\u2193</span> merge ${kids.length === 1 ? 'this' : 'these ' + kids.length} first</div>
-           <ul class="tree">${kids.map(node).join('')}</ul>`
-        : ''
-    }
   </li>`;
 }
 
-export function render({ groups, author, org, generatedAt, withheld, total }) {
+export function render({ graph, groups, author, org, generatedAt, withheld, total }) {
+  if (!graph.layout) graph.layout = layoutGraph(graph);
+  const edgeCount = graph.edges.filter(e => !e.cycle).length;
+  const svg = graphSvg(graph);
+
   const body = groups
-    .map(
-      g => `<section class="repo">
-      <h2>${esc(g.repo)} <span class="count">${g.count} open</span></h2>
-      <p class="readup">${g.roots.length === 1 ? 'this merges last' : 'these merge last'} — read upward from the leaves</p>
-      <ul class="tree root">${g.roots.map(node).join('')}</ul>
-    </section>`
-    )
+    .map(g => {
+      const heading = g.withheld
+        ? `<h2>${esc(g.label)}</h2>`
+        : `<h2>${esc(g.repo)} <span class="count">${g.count} open</span></h2>`;
+      const mine = g.mine.map(nodeRow).join('');
+      const referenced = g.referenced.length
+        ? `<p class="readup">referenced only — drawn because something above needs ${
+            g.referenced.length === 1 ? 'it' : 'them'
+          }, not counted in the open set</p>
+           <ul class="tree">${g.referenced.map(nodeRow).join('')}</ul>`
+        : '';
+      return `<section class="repo">
+      ${heading}
+      <p class="readup">every PR once, with every edge it is on — a prerequisite merges before the PR that needs it</p>
+      ${mine ? `<ul class="tree root">${mine}</ul>` : ''}
+      ${referenced}
+    </section>`;
+    })
     .join('');
 
   // The notice counts only PRs this page would otherwise have drawn, so it
   // measures what privacy is hiding and nothing else. It also says whether any
-  // of them blocks something visible, because a withheld PR that blocks
-  // nothing above costs the tree a separate root, not a broken chain.
+  // of them blocks something visible, because a withheld PR that blocks nothing
+  // costs the graph a node with no edges, not a broken chain.
   const n = withheld.count;
   const many = n > 1;
   const withheldNote = n
     ? `<p class="withheld"><strong>${n} PR${many ? 's' : ''} withheld.</strong>
        ${many ? `They are ${esc(author)}'s own and live in private repos` : `It is ${esc(author)}'s own and lives in a private repo`},
-       and this page is served publicly, so ${many ? 'they are' : 'it is'} not rendered here.
+       and this page is served publicly, so ${many ? 'they are' : 'it is'} not drawn here.
        ${
          withheld.blocking
            ? `<strong>${withheld.blocking}</strong> of ${many ? 'them' : 'it'} block${withheld.blocking > 1 ? '' : 's'}
-              a PR shown above — that edge is drawn on the blocked PR, but its target is not rendered.`
-           : `${n === 2 ? 'Neither' : many ? 'None of them' : 'It'} blocks anything shown above, so no edge is
-              missing from the tree: withholding ${many ? 'them' : 'it'} costs the page
-              ${n} standalone root${many ? 's' : ''}, not a broken chain.`
+              a PR on this page — that edge <em>is</em> drawn, and so is its target, but the target keeps
+              only its number: no title, no author, not even the repo name.`
+           : `${n === 2 ? 'Neither' : many ? 'None of them' : 'It'} blocks anything on this page, so no edge is
+              missing from the graph: withholding ${many ? 'them' : 'it'} costs the page
+              ${n} node${many ? 's' : ''} that would have had no edges anyway, not a broken chain.`
        }
        Set <code>INCLUDE_PRIVATE=true</code> on a private build to see ${many ? 'them' : 'it'}.
        This page does not pretend the work does not exist.</p>`
@@ -168,7 +176,7 @@ export function render({ groups, author, org, generatedAt, withheld, total }) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Merge from the leaves up — ${esc(author)} @ ${esc(org)}</title>
+<title>PR dependency graph — merge from the bottom up — ${esc(author)} @ ${esc(org)}</title>
 <style>
 :root{
   --surface:#fcfcfb; --raised:#ffffff;
@@ -197,25 +205,18 @@ h2{font-size:14px;font-weight:600;margin:28px 0 4px;padding-bottom:6px;
 .count{color:var(--muted);font-weight:400}
 .readup{font-size:11px;color:var(--muted);margin:0 0 8px;letter-spacing:.03em;text-transform:uppercase}
 
-/* The direction banner. An inverted tree is ambiguous without a label, so the
-   direction is stated once, loudly, at the top -- and again on every branch,
-   right next to the nesting it describes. */
+/* The direction banner. A dependency graph is ambiguous without a label, so the
+   direction is stated once, loudly, at the top -- and again in the figure
+   caption, and again on every single edge in the list below it. */
 .direction{border:1px solid var(--ring);border-left:3px solid var(--good);border-radius:6px;
   padding:12px 14px;background:var(--raised);margin:0 0 20px;font-size:13px;color:var(--ink2)}
 .direction strong{color:var(--ink)}
 .direction>strong{font-size:14px}
 .direction ul{margin:8px 0 0;padding-left:18px}
 .direction li{margin:4px 0}
+${graphCss(graph.layout.width)}
 ul.tree{list-style:none;margin:0;padding:0}
-ul.tree ul.tree{margin-left:14px;padding-left:18px;border-left:2px solid var(--rule)}
 ul.tree>li{position:relative;margin:6px 0}
-ul.tree ul.tree>li::before{content:"";position:absolute;left:-18px;top:18px;
-  width:14px;height:1px;background:var(--rule)}
-/* the "merge these first" rail label, sitting between a node and its
-   prerequisites, so the direction is legible at every single nesting */
-.downto{margin:5px 0 1px 14px;padding-left:6px;font-size:11px;font-weight:600;
-  letter-spacing:.03em;text-transform:uppercase;color:var(--muted)}
-.downto .arrow{font-family:ui-monospace,monospace;font-weight:700;color:var(--ink2)}
 .pr{background:var(--raised);border:1px solid var(--ring);border-radius:6px;padding:8px 10px}
 .pr.dep{background:transparent;border-style:dashed}
 .line1{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
@@ -223,6 +224,13 @@ ul.tree ul.tree>li::before{content:"";position:absolute;left:-18px;top:18px;
 .num:hover{text-decoration:underline}
 .title{color:var(--ink2)}
 .line2{margin-top:5px;font-size:12px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+/* the edge list: every arrow the SVG draws, written out on both of its ends */
+ul.edges{list-style:none;margin:6px 0 0;padding:6px 0 0;border-top:1px dashed var(--rule);
+  font-size:12px}
+ul.edges li{margin:3px 0;display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
+ul.edges li.out{color:var(--muted)}
+ul.edges .dir{font-size:11px;letter-spacing:.03em;text-transform:uppercase;color:var(--muted)}
+ul.edges .why{flex-basis:100%}
 .badge{display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border-radius:999px;
   border:1px solid currentColor;font-size:11px;font-weight:600;white-space:nowrap}
 .badge .g{font-family:ui-monospace,monospace}
@@ -234,10 +242,8 @@ ul.tree ul.tree>li::before{content:"";position:absolute;left:-18px;top:18px;
 .status{color:var(--ink2);font-size:11px;border:1px solid var(--ring);border-radius:4px;padding:0 5px}
 .gate{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--serious-ink)}
 .why{margin-top:5px;font-size:12px;color:var(--muted)}
-.note{margin-top:5px;font-size:11px;color:var(--muted)}
-.note.repeat{color:var(--serious-ink);border-top:1px dashed var(--rule);padding-top:5px}
 .withheld{border:1px solid var(--ring);border-left:3px solid var(--warning);border-radius:6px;
-  padding:10px 12px;font-size:13px;color:var(--ink2);background:var(--raised)}
+  padding:10px 12px;font-size:13px;color:var(--ink2);background:var(--raised);margin:0 0 20px}
 details.syntax{border:1px solid var(--ring);border-radius:6px;padding:10px 12px;background:var(--raised);margin-bottom:8px}
 details.syntax summary{cursor:pointer;font-weight:600;font-size:13px}
 details.syntax pre{background:var(--surface);border:1px solid var(--rule);border-radius:4px;
@@ -249,39 +255,71 @@ footer{margin-top:40px;padding-top:12px;border-top:1px solid var(--rule);font-si
 </style>
 </head><body><main>
 
-<h1>Open PRs — merge from the leaves up</h1>
+<h1>Open PRs — merge from the bottom up</h1>
 <p class="sub">${esc(author)} · ${esc(org)} · ${total} open PR${total === 1 ? '' : 's'} ·
   built ${esc(generatedAt.replace('T', ' ').slice(0, 16))} UTC</p>
 
 <div class="direction">
-<strong>Read every list bottom-up. A PR is drawn above the things it needs.</strong>
+<strong>Read the graph bottom-up. A PR sits above the things it needs.</strong>
 <ul>
-<li>A node's <strong>children are its prerequisites</strong>, so the deepest leaf merges
-    <strong>first</strong> and the PR at the top of a list merges <strong>last</strong>.</li>
-<li>A PR with nothing beneath it has nothing left to wait for.</li>
-<li>Every root is a PR by <strong>${esc(author)}</strong>. Somebody else's PR appears only as a
-    prerequisite underneath one of ${esc(author)}'s, badged
-    <span class="badge foreign"><span class="g">\u25c7</span>not yours</span> — an unbadged node is
+<li>Every arrow runs <strong>from a prerequisite to the PR that waits on it</strong>, so the bottom
+    rank merges <strong>first</strong> and the top rank merges <strong>last</strong>.</li>
+<li>A PR with no arrow arriving at it has nothing left to wait for.</li>
+<li><strong>Every PR is drawn exactly once.</strong> A PR that two others need is one box with two
+    arrows leaving it, not two boxes. Nothing on this page is a copy of anything else on it.</li>
+<li>Every PR listed under a repo heading is by <strong>${esc(author)}</strong>. Somebody else's PR is
+    here only as the target of one of ${esc(author)}'s dependencies, badged
+    <span class="badge foreign"><span class="g">◇</span>not yours</span> — an unbadged node is
     ${esc(author)}'s own.</li>
-<li>A PR needed by two others is drawn under both, and every copy says where the others are.
-    Inverting the tree moves the duplication, it does not abolish it.</li>
 </ul>
 </div>
 
+<figure class="graph">
+<figcaption><strong>One box per PR; an arrow runs from a prerequisite up to the PR that waits on
+it.</strong> ${graph.nodes.length} PR${graph.nodes.length === 1 ? '' : 's'},
+${edgeCount} dependency edge${edgeCount === 1 ? '' : 's'},
+${graph.layout.maxRank + 1} rank${graph.layout.maxRank === 0 ? '' : 's'} — laid out by dependency
+depth. The same relationships are written out under the repo headings below, so nothing here depends
+on the drawing rendering.</figcaption>
+<div class="gwrap">
+${svg}
+</div>
+<p class="legend">
+<span><span class="k">arrow</span> merge the tail before the head</span>
+<span><span class="k">solid line</span> same repo</span>
+<span><span class="k">dashed line</span> crosses repos</span>
+<span><span class="k">dashed box</span> not ${esc(author)}'s PR</span>
+<span><span class="k">left edge</span> which rank merges when</span>
+</p>
+</figure>
+
+${withheldNote}
+
 <details class="syntax">
-<summary>Why the tree points this way (and what inverting costs)</summary>
-<p>A PR can have several <em>independent</em> prerequisites. <code>stamp#491</code> needs
-<code>stamp#504</code> merged <strong>and</strong> <code>snapshot.js#1225</code> released, and
-neither of those two depends on the other.</p>
-<p>Drawn the obvious way round — prerequisites as ancestors — <code>#491</code> would have two
-parents. Two parents is a graph, and a graph does not fit in a nested list, so that drawing has to
-pick one parent and demote the rest to a footnote. <strong>Inverted, <code>#491</code> has two
-children</strong>, which is exactly a tree, no edge is dropped, and reading order becomes merge
-order.</p>
-<p>The cost, stated rather than hidden: inverting does not make the structure a tree in general,
-it moves where the duplication lands. A PR that is a prerequisite of <em>two</em> of
-${esc(author)}'s is now drawn twice, once under each. That is the rarer direction in practice, and
-every repeated node carries a note naming where its other copies are.</p>
+<summary>Why this is a graph and not a tree</summary>
+<p>Dependencies between PRs are not tree-shaped in either direction, and this page used to be a
+nested list, which forced the issue. A PR can have several <em>independent</em> prerequisites:
+<code>stamp#491</code> needs <code>stamp#504</code> merged <strong>and</strong>
+<code>snapshot.js#1225</code> released, and neither of those depends on the other. A PR can equally
+<em>be</em> the prerequisite of several others.</p>
+<p>A nested list gives every node exactly one place, so one of those two shapes always has to be
+faked. The previous drawing nested prerequisites as children, which handled #491's two
+prerequisites — but then <code>snapshot.js#1225</code>, which is both one of
+${esc(author)}'s own PRs and a prerequisite of <code>stamp#491</code>, had to be
+<strong>drawn twice</strong>, once in each place, with a footnote on each copy pointing at the
+other.</p>
+<p><strong>A graph has no such problem: one node, as many edges as the data has.</strong>
+<code>snapshot.js#1225</code> is now a single box with one arrow leaving it, into
+<code>stamp#491</code>. There is no second copy and no footnote, because the duplication was a
+workaround for the shape of a nested list and never a fact about the PRs.</p>
+<p>The drawing is <strong>one page-wide graph</strong> rather than one per repo, because the edge
+that forced this rework crosses repos: an arrow between two separate diagrams needs either
+client-side code or two hand-tuned coordinate systems, and on one canvas it is just an arrow. Repo
+grouping survives in the list underneath, where every PR still appears under its own repo — once.</p>
+<p>The diagram is generated <strong>at build time</strong> as inline SVG and the page loads nothing:
+no Mermaid, no graph library, no CDN, not one <code>&lt;script&gt;</code> tag. That is also why the
+full relationship list is kept below it rather than replaced by it — an SVG that fails to render
+must not take the dependency information with it.</p>
 </details>
 
 <details class="syntax">
@@ -289,7 +327,7 @@ every repeated node carries a note naming where its other copies are.</p>
 <p>Explicit stacks — a PR whose base branch is another open PR's head — are computed from the
 GitHub API and are always correct, so they need no declaration. The other two kinds GitHub
 cannot see, so you write them in the <strong>PR body</strong> of the PR that is blocked, and they
-are drawn <em>beneath</em> it here:</p>
+become an arrow <em>into</em> it here:</p>
 <pre>Depends on #504
 Depends on snapshot-labs/snapshot.js#1225
 Depends on release of snapshot-labs/snapshot.js#1225
@@ -300,17 +338,17 @@ Depends on #504 — reason shown on this page</pre>
 <li><code>Depends on release of owner/repo#123</code> — cross-repo and <em>release-gated</em>.
     Merging is <strong>not</strong> enough: satisfied only once a non-draft release of that repo
     is published <em>after</em> the PR merged.</li>
-<li>A trailing <code>—</code>, <code>-</code> or <code>:</code> adds a reason, rendered under the node.</li>
+<li>A trailing <code>—</code>, <code>-</code> or <code>:</code> adds a reason, rendered on the edge.</li>
 </ul>
-<p><strong>Whose PRs appear here.</strong> Every root of every list is a PR by
-<code>${esc(author)}</code>; a root is never anybody else's. Somebody else's PR is drawn only when one
-of these depends on it, as a <em>leaf beneath</em> the blocked PR, marked
-<span class="badge foreign"><span class="g">\u25c7</span>not yours · @handle</span> — never as a root.
-Dropping it instead would hide why the PR above it cannot merge. A PR by another author that
-nothing here depends on is not drawn at all.</p>
-<p>A prerequisite in <em>another</em> repo is drawn as a leaf and is not expanded, even when it is
-one of ${esc(author)}'s own PRs with a stack of its own. That stack is drawn in full under its own
-repo heading, and the leaf says so.</p>
+<p><strong>Whose PRs appear here.</strong> Every PR listed under a repo heading is by
+<code>${esc(author)}</code>. Somebody else's PR is drawn only when one of these depends on it, as the
+<em>target of that edge</em>, marked
+<span class="badge foreign"><span class="g">◇</span>not yours · @handle</span> and listed apart
+from ${esc(author)}'s own. Dropping it instead would hide why the PR pointing at it cannot merge. A PR
+by another author that nothing here depends on is not drawn at all.</p>
+<p>A prerequisite in <em>another</em> repo is the <em>same node</em> as that PR's own entry when it is
+one of ${esc(author)}'s: one box, drawn once, with an arrow that crosses the repo boundary. That is
+what changed — it used to be a leaf copy plus a footnote.</p>
 <p>Parsing rules, so prose never becomes an edge: the line must <strong>start</strong> with
 <code>Depends on</code> (a leading <code>-</code> bullet is fine); lines inside fenced code blocks are
 ignored; and <strong>blockquoted lines are ignored</strong>, so quoting another PR body — or a
@@ -330,12 +368,10 @@ the base carries the same red, <strong>not</strong> proof that the PR is otherwi
 why the badge says "base is red too" rather than "this PR is fine".</p>
 </details>
 
-${withheldNote}
-
 ${body}
 
-<footer>Merge order runs from the leaves up. Rebuilt on a schedule by a GitHub Action.
+<footer>Merge order runs from the bottom of the graph up: an arrow's tail merges before its head.
 Prerequisites GitHub cannot compute come from PR bodies — if an edge is missing here, declare it
-there.</footer>
+there. Rebuilt on a schedule by a GitHub Action.</footer>
 </main></body></html>`;
 }
