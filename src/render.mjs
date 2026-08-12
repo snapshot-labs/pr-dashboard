@@ -356,7 +356,8 @@ heuristically: an edge exists because somebody wrote it.</p>
 <summary>How this page is built</summary>
 <p>Merge order runs left to right: an arrow's tail merges before its head, and PRs sharing a
 column have no order between them at all. Prerequisites GitHub cannot compute come from PR bodies —
-if an edge is missing here, declare it there. Rebuilt on a schedule by a GitHub Action.</p>
+if an edge is missing here, declare it there. Rebuilt by hand when somebody publishes it, not on a
+schedule.</p>
 <p>The diagram is generated <strong>at build time</strong> as inline SVG and written into this file
 as markup. The page loads <strong>nothing</strong>: no Mermaid, no graph library, no CDN, no font, not
 one <code>&lt;script&gt;</code> tag. The blocks on this page are native

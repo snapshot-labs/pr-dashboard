@@ -1,6 +1,7 @@
-# The GitHub Action builds dist/ and pushes it with the Netlify CLI, so Netlify
-# itself runs no build. Keep it that way: a Netlify-side build would need a
-# GitHub token in Netlify's environment as well.
+# dist/ is built and pushed from outside Netlify -- by hand with ./publish.sh
+# today, with the Netlify CLI if .github/build.yml is ever installed -- so
+# Netlify itself runs no build. Keep it that way: a Netlify-side build would
+# need a GitHub token in Netlify's environment as well.
 [build]
   publish = "dist"
   command = ""

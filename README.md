@@ -1,8 +1,9 @@
 # pr-dashboard
 
 Open PRs across `snapshot-labs`, drawn as a **dependency graph: one node per PR, however many edges
-that PR is on**. Static HTML, no server, no database, and nothing loaded at runtime: a GitHub Action
-runs `node build.mjs` on a schedule and publishes `dist/index.html`.
+that PR is on**. Static HTML, no server, no database, and nothing loaded at runtime: `./publish.sh`
+runs `node build.mjs` and publishes `dist/index.html` when somebody runs it by hand, not on a
+schedule.
 
 ## Which way the graph points
 
@@ -248,8 +249,8 @@ still complete and still reachable without seeing the picture; its *navigability
 The intended host is Netlify, and the deploy step is written and ready in `.github/build.yml` —
 it is skipped until `NETLIFY_AUTH_TOKEN` and `NETLIFY_SITE_ID` exist as repo secrets, because no
 Netlify credential was available to the account that built this. GitHub Pages is serving in the
-meantime so the page is actually usable; adding the two secrets switches Netlify on with no code
-change, and Pages can then be turned off or left as a mirror.
+meantime so the page is actually usable; once that workflow is installed, adding the two secrets
+switches Netlify on with no code change, and Pages can then be turned off or left as a mirror.
 
 ## Whose PRs are on it
 
