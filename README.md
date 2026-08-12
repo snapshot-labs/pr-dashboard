@@ -1,8 +1,31 @@
 # pr-dashboard
 
-Open PRs across `snapshot-labs`, grouped by repo and drawn as a **merge-order tree**, so a
-stack is visible at a glance. Static HTML, no server, no database: a GitHub Action runs
+Open PRs across `snapshot-labs`, grouped by repo and drawn as a **merge-order tree that points
+downward: leaves merge first**. Static HTML, no server, no database: a GitHub Action runs
 `node build.mjs` on a schedule and publishes `dist/index.html`.
+
+## Which way the tree points
+
+**A PR is drawn above the things it needs. A node's children are its prerequisites, so the
+deepest leaf merges first and the root merges last. Read every list bottom-up.**
+
+The reason is that a PR can have several *independent* prerequisites. `stamp#491` needs
+`stamp#504` merged **and** `snapshot.js#1225` released, and neither of those depends on the other.
+Drawn the obvious way round — prerequisites as ancestors — `#491` has two parents, which is a
+graph, and a graph does not fit in a nested list: the drawing has to pick one parent and demote
+the rest to a footnote. Inverted, `#491` has two children, which is exactly a tree, no edge is
+dropped, and reading order *is* merge order.
+
+The cost, stated rather than hidden: **inverting does not make the structure a tree in general, it
+moves where the duplication lands.** A PR that is a prerequisite of *two* of yours is now drawn
+twice, once under each. That is the rarer direction in practice, but it is real — today
+`snapshot.js#1225` is a root of its own repo *and* a prerequisite of `stamp#491` — so every node
+drawn more than once carries a note naming where its other copies are, and never reads as two
+pieces of work. `markRepeats()` does that pass over the finished forest.
+
+An inverted tree is ambiguous without a label, so the direction is stated in the page title, in a
+banner at the top, under every repo heading, and again as a `↓ merge these first` rail label at
+every single nesting.
 
 ## Where it is deployed
 
@@ -16,19 +39,25 @@ change, and Pages can then be turned off or left as a mirror.
 
 ## Whose PRs are on it
 
-**Every node of every tree is a PR by `PR_AUTHOR`. A root is never anybody else's.**
+**Every root of every list is a PR by `PR_AUTHOR`. A root is never anybody else's.**
 
 Somebody else's PR earns a place in exactly one way: one of yours depends on it. Then it is drawn
-as a **dependency on your blocked PR**, labelled `◇ not yours · @handle`, and never as a node or a
-root of its own. A PR by another author that nothing of yours points at is not drawn at all.
+as a **leaf beneath your blocked PR**, labelled `◇ not yours · @handle`, and never as a root. A PR
+by another author that nothing of yours points at is not drawn at all.
 
 The reason it is not simply filtered out: `sx-monorepo#2222` is branched off `#2219`, which is
-wa0x6e's. Dropping `#2219` would hide why `#2222` cannot merge, so it stays — as an edge, marked.
+wa0x6e's. Dropping `#2219` would hide why `#2222` cannot merge, so it stays — beneath `#2222`,
+marked.
 
-Merge order runs root-first, so a dependency is a *parent*. That is exactly why another author's
-PR cannot be a tree node at all: as a dependency of yours it would sit above yours, which makes it
-a root, which is the thing being ruled out. `buildGroups()` therefore drops every non-`PR_AUTHOR`
-PR before laying out the forest, and reports what it dropped on `groups.pruned`.
+Pointing the tree downward makes this rule easier to hold, not harder. A prerequisite is now a
+*child*, so somebody else's PR can only be reached by following one of yours downward: there is no
+path by which it surfaces as a root. `buildGroups()` still drops every non-`PR_AUTHOR` PR from the
+root set explicitly and reports what it dropped on `groups.pruned`, so the rule does not rest on
+that argument alone.
+
+A prerequisite in **another repo** is drawn as a leaf and is not expanded, even when it is one of
+your own PRs with a stack of its own — expanding it would drag another repo's whole stack into
+this repo's list. That stack is drawn in full under its own repo heading, and the leaf says so.
 
 ## Declaring a dependency
 
@@ -44,7 +73,7 @@ matters — it is where somebody looking at the tree will go. In short, three ki
 `Depends on release of …` is satisfied only when the target PR is merged **and** a non-draft
 release of that repo was published afterwards — merging alone does not clear it.
 
-A trailing `—`, `-` or `:` adds a reason, which is rendered beside the edge.
+A trailing `—`, `-` or `:` adds a reason, which is rendered under the node it explains.
 
 **Nothing is inferred.** An edge exists because somebody wrote it. To keep prose from becoming
 an edge, a declaration must start its line (a leading `-` bullet is allowed), and lines inside
@@ -64,7 +93,7 @@ deliberately says "base is red too" and not "this PR is fine".
 
 ```sh
 GH_TOKEN=$(gh auth token) node build.mjs   # writes dist/index.html
-GH_TOKEN=$(gh auth token) node test.mjs    # 33 tests
+GH_TOKEN=$(gh auth token) node test.mjs    # 43 tests
 python3 -m http.server -d dist             # look at it
 ```
 

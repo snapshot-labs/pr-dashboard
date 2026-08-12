@@ -1,9 +1,31 @@
 #!/usr/bin/env node
-// Builds dist/index.html: my open PRs across an org, as a merge-order tree.
+// Builds dist/index.html: my open PRs across an org, drawn so that the LEAVES
+// MERGE FIRST.
+//
+// Direction of the tree, which is the whole idea:
+//
+//   a PR is drawn ABOVE the things it needs. A node's children are its
+//   prerequisites. You read each list bottom-up -- the deepest leaf is the
+//   next thing that can merge, the root is the last.
+//
+// Why this direction and not the other one. A PR can have SEVERAL independent
+// prerequisites: stamp#491 needs stamp#504 merged AND snapshot.js#1225
+// released, and neither of those depends on the other. Drawn the other way
+// round -- prerequisites as ancestors -- #491 has two parents. Two parents is a
+// graph, and a graph does not fit in a nested list, so the previous build had
+// to pick one parent and demote the rest to a footnote. Inverted, #491 has two
+// children, which is exactly a tree, and no edge has to be dropped. Reading
+// order then IS merge order.
+//
+// The honest caveat: inverting does not make the structure a tree in general,
+// it moves where the duplication lands. If ONE PR is a prerequisite of TWO of
+// mine, it is now drawn twice, once under each. That is the rarer direction in
+// practice, but it is real -- snapshot.js#1225 is a root of its own repo AND a
+// prerequisite of stamp#491 today -- so every node drawn more than once says
+// so and names the other place. Nothing is silently duplicated.
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import {
-  api,
   apiCallCount,
   getBranchHead,
   getChecks,
@@ -27,14 +49,13 @@ const INCLUDE_PRIVATE = process.env.INCLUDE_PRIVATE === 'true';
 // The tree roots on MY PRs only.
 //
 // Somebody else's PR earns a place on this page in exactly one way: one of
-// mine depends on it. Then it is drawn as a dependency hanging off my PR and
-// labelled with its author, so it never reads as my work. It is never a root,
-// never the top of a subtree of its own, and if nothing of mine points at it
-// it is not fetched or drawn at all.
+// mine depends on it. Then it is drawn as a prerequisite hanging BENEATH my PR
+// and labelled with its author, so it never reads as my work. It is never a
+// root, and if nothing of mine points at it, it is not fetched or drawn at all.
 //
 // Today that rule bites once: sx-monorepo#2222 (mine) is branched off #2219
 // (wa0x6e's). Dropping #2219 would hide why #2222 cannot merge, so it stays --
-// as a dependency, marked, not as a root.
+// beneath #2222, marked as another author's, never as a root.
 export const isMineFor = author => login =>
   String(login || '').toLowerCase() === String(author).toLowerCase();
 const isMine = isMineFor(AUTHOR);
@@ -115,8 +136,9 @@ async function main() {
 
     // 1. explicit stack: base branch is another OPEN PR's head branch.
     //    Any author -- a stack can sit on a colleague's branch (sx#2222 sits
-    //    on wa0x6e's #2219). A colleague's PR reached this way is a dependency
-    //    of mine and is drawn as one; it is not promoted to a node of the tree.
+    //    on wa0x6e's #2219). A colleague's PR reached this way is a
+    //    prerequisite of mine and is drawn as one, beneath my PR; it is never
+    //    promoted to a root.
     //
     //    Two guards, because the naive name match is badly wrong. A PR opened
     //    FROM A FORK's default branch has head.ref === "master", which matches
@@ -193,6 +215,12 @@ async function main() {
   console.log(
     `withheld: ${withheld.count} (${withheld.blocking} of them block a PR shown on the page)`
   );
+  for (const g of groups) {
+    console.log(
+      `${g.repo}: ${g.count} mine, ${g.roots.length} merge-last root(s), ${g.drawn} node(s) drawn` +
+        (g.repeats ? `, ${g.repeats} of them a repeat` : '')
+    );
+  }
 
   mkdirSync('dist', { recursive: true });
   const html = render({
@@ -207,7 +235,7 @@ async function main() {
   console.log(`wrote dist/index.html (${html.length} bytes, ${apiCallCount()} API calls)`);
 }
 
-// Is a dependency already met?
+// Is a prerequisite already met?
 export async function resolveStatus(edge, target) {
   if (!target) return { satisfied: false, status: 'unreadable' };
 
@@ -259,17 +287,28 @@ export function accountWithheld(withheldPrs, visible, mine) {
   };
 }
 
-// Group by repo and lay each repo out as a forest ordered by merge order.
+export const shortRef = (repo, number) => `${String(repo).split('/').pop()}#${number}`;
+
+// --- the tree, inverted so the LEAVES MERGE FIRST -----------------------
 //
-// Merge order runs root-first: a node's parent is the thing that has to land
-// before it. That is exactly why somebody else's PR cannot be a tree node --
-// as a dependency of mine it would have to sit ABOVE mine, which makes it a
-// root, which is the thing being ruled out. So a foreign PR stays an edge
-// drawn on my node (see decorateEdge) and never enters the forest.
-export function buildGroups(prs, mine) {
-  // Step one, before anything else is computed: the forest is built out of my
-  // PRs only. A foreign PR here has nothing of mine hanging off it (if it did,
-  // that would be an edge on my node, not a node of its own), so it is pruned.
+// One list per repo. A root is one of MY PRs in that repo that no other of my
+// PRs in that repo needs -- the thing that merges LAST. Beneath each node hang
+// its prerequisites, and beneath those, theirs.
+//
+// Roots are still mine and only mine. Under this direction that rule is easier
+// to hold, not harder: somebody else's PR can only ever be reached by
+// following one of MY edges downward, so it lands as a leaf beneath my PR and
+// there is no way for it to surface as a root. It is still pruned from the
+// root set explicitly, so the rule does not rest on that argument alone.
+//
+// A prerequisite that is itself one of my PRs in the same repo is expanded in
+// place, with its own subtree. Anything else -- another author's PR, a PR in
+// another repo, a PR the token cannot read -- is drawn as a marked leaf and
+// deliberately NOT expanded: it is not this repo's work, and following it would
+// drag another repo's whole stack into this list.
+export function buildGroups(prs, mine = () => true) {
+  // A foreign PR is never a node of the root set. It reaches the page only by
+  // being on the far end of one of my edges, and it is drawn there, marked.
   const pruned = prs.filter(p => !mine(p.author)).map(p => `${p.repo}#${p.number}`);
 
   const byRepo = new Map();
@@ -283,57 +322,111 @@ export function buildGroups(prs, mine) {
   for (const [repo, list] of [...byRepo.entries()].sort()) {
     const local = new Map(list.map(p => [p.number, p]));
 
-    for (const pr of list) {
-      // In-repo, unsatisfied edges to a PR that is also on this page become
-      // tree edges. Everything else stays an annotation on the node -- which
-      // is where a dependency on somebody else's PR lands, because `local`
-      // holds none of theirs. sx#2222's edge to wa0x6e's #2219 goes down this
-      // path: not a tree edge, still rendered, still explains the block.
-      pr.parents = (pr.deps || [])
-        .filter(d => !d.crossRepo && d.repo === repo && local.has(d.number) && !d.satisfied)
-        .map(d => d.number);
-      pr.children = [];
-    }
+    // An edge expands in place only when it lands on one of my PRs in THIS repo.
+    const expands = d => !d.crossRepo && d.repo === repo && local.has(d.number);
 
-    // A PR can depend on two others; a tree has one slot. It is placed under
-    // the first parent and the rest are annotated, so no edge is lost.
-    const placed = new Set();
-    for (const pr of list) {
-      pr.extraParents = pr.parents.slice(1);
-      const p = pr.parents[0];
-      if (p !== undefined && !createsCycle(pr.number, p, local)) {
-        local.get(p).children.push(pr.number);
-        placed.add(pr.number);
-      } else if (p !== undefined) {
-        pr.cycle = true;
-      }
-    }
+    // Same-repo prerequisites first, then cross-repo, numerically within each,
+    // so a repo's own stack reads contiguously before the outside world.
+    const order = (a, b) =>
+      Number(Boolean(a.crossRepo)) - Number(Boolean(b.crossRepo)) ||
+      a.repo.localeCompare(b.repo) ||
+      a.number - b.number;
 
-    // Every remaining node is mine, so every root is mine.
-    const roots = list.filter(p => !placed.has(p.number)).map(p => p.number);
-    groups.push({
-      repo,
-      roots: roots.sort((a, b) => a - b),
-      nodes: local,
-      count: list.length
+    const leaf = d => ({
+      kind: 'dep',
+      key: `${d.repo}#${d.number}`,
+      repo: d.repo,
+      number: d.number,
+      url: d.url,
+      title: d.title,
+      author: d.author,
+      foreign: Boolean(d.foreign),
+      hidden: Boolean(d.hidden),
+      crossRepo: Boolean(d.crossRepo),
+      edge: d,
+      children: []
     });
+
+    const build = (pr, edge, path) => {
+      const node = {
+        kind: 'own',
+        key: `${repo}#${pr.number}`,
+        repo,
+        number: pr.number,
+        url: pr.url,
+        title: pr.title,
+        author: pr.author,
+        foreign: false,
+        crossRepo: false,
+        pr,
+        edge,
+        children: []
+      };
+      // A needs B needs A. Stop and say so rather than recurse forever.
+      if (path.has(node.key)) {
+        node.cycle = true;
+        return node;
+      }
+      const next = new Set(path).add(node.key);
+      for (const d of [...(pr.deps || [])].sort(order)) {
+        node.children.push(expands(d) ? build(local.get(d.number), d, next) : leaf(d));
+      }
+      return node;
+    };
+
+    // Roots are the PRs nothing else here waits on: they merge last.
+    const needed = new Set();
+    for (const pr of list) for (const d of pr.deps || []) if (expands(d)) needed.add(d.number);
+    const roots = list
+      .filter(p => !needed.has(p.number))
+      .sort((a, b) => a.number - b.number)
+      .map(p => build(p, null, new Set()));
+
+    let drawn = 0;
+    const tally = n => {
+      drawn++;
+      n.children.forEach(tally);
+    };
+    roots.forEach(tally);
+
+    groups.push({ repo, roots, count: list.length, drawn, repeats: 0 });
   }
+
+  markRepeats(groups);
   groups.pruned = pruned;
   return groups;
 }
 
-function createsCycle(from, to, local) {
-  const seen = new Set();
-  let stack = [to];
-  while (stack.length) {
-    const n = stack.pop();
-    if (n === from) return true;
-    if (seen.has(n)) continue;
-    seen.add(n);
-    const node = local.get(n);
-    if (node) stack.push(...node.parents);
+// Inverting moves the duplication, it does not remove it: a PR that TWO of
+// mine need is now drawn under both. Every copy is labelled with where the
+// others are, so two drawings of one PR never read as two pieces of work.
+export function markRepeats(groups) {
+  const seen = new Map();
+  const owner = new Map();
+
+  for (const g of groups) {
+    const walk = (n, where) => {
+      if (!seen.has(n.key)) seen.set(n.key, []);
+      seen.get(n.key).push({ node: n, where });
+      owner.set(n, g);
+      const under = `under ${shortRef(n.repo, n.number)}`;
+      for (const c of n.children) walk(c, under);
+    };
+    for (const r of g.roots) walk(r, `at the top of ${r.repo.split('/').pop()}`);
   }
-  return false;
+
+  for (const copies of seen.values()) {
+    if (copies.length < 2) continue;
+    for (const c of copies) {
+      c.node.repeat = {
+        total: copies.length,
+        others: copies.filter(o => o !== c).map(o => o.where)
+      };
+      const g = owner.get(c.node);
+      if (g) g.repeats++;
+    }
+  }
+  return groups;
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
