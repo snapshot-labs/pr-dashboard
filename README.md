@@ -65,3 +65,16 @@ quietly drop them. Set `INCLUDE_PRIVATE=true` only for a build that is not publi
 - **`NETLIFY_AUTH_TOKEN`** + **`NETLIFY_SITE_ID`** (repo secrets) — deploy target. The deploy
   step is skipped when they are absent, so the workflow stays green until they are set.
 - No token is committed anywhere in this repo.
+
+## Installing the scheduled Action (one step, needs a token I do not have)
+
+`.github/build.yml` is the finished workflow. It is parked one directory up because creating a
+file under `.github/workflows/` requires a token carrying the **`workflow`** OAuth scope, and the
+account that built this repo has only `gist, read:org, repo`. To activate it:
+
+```sh
+git mv .github/build.yml .github/workflows/build.yml
+git commit -m "activate scheduled build" && git push
+```
+
+Until then nothing rebuilds on a schedule; `./publish.sh` refreshes the published page by hand.

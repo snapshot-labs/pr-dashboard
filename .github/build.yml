@@ -1,0 +1,68 @@
+name: build and deploy
+
+on:
+  schedule:
+    # every 2 hours; GitHub queues cron, so it is not to the minute
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+# only one deploy at a time, and let a newer run win
+concurrency:
+  group: pr-dashboard
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test
+        run: node test.mjs
+        env:
+          GH_TOKEN: ${{ secrets.PR_DASHBOARD_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        run: node build.mjs
+        env:
+          # PR_DASHBOARD_TOKEN is a read-only PAT that can see every snapshot-labs
+          # repo. The default GITHUB_TOKEN is scoped to THIS repo, so it cannot
+          # search across the org and would silently under-report.
+          GH_TOKEN: ${{ secrets.PR_DASHBOARD_TOKEN || secrets.GITHUB_TOKEN }}
+          PR_AUTHOR: ${{ vars.PR_AUTHOR || 'tony8713' }}
+          PR_ORG: ${{ vars.PR_ORG || 'snapshot-labs' }}
+          # Private-repo PRs are withheld from the public page unless this is true.
+          INCLUDE_PRIVATE: ${{ vars.INCLUDE_PRIVATE || 'false' }}
+
+      - name: Deploy to Netlify
+        if: ${{ secrets.NETLIFY_AUTH_TOKEN != '' && secrets.NETLIFY_SITE_ID != '' }}
+        run: |
+          npx --yes netlify-cli@17 deploy \
+            --prod \
+            --dir=dist \
+            --site="$NETLIFY_SITE_ID" \
+            --auth="$NETLIFY_AUTH_TOKEN" \
+            --message "scheduled rebuild ${GITHUB_SHA::7}"
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+
+      # GitHub Pages, so the page is live even before the Netlify secrets exist.
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - id: pages
+        uses: actions/deploy-pages@v4
