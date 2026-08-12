@@ -8,6 +8,20 @@
 // not mine; a chain with none of mine in it is not drawn at all. See the block
 // above isMineFor().
 //
+// WHICH MERGED PRs are on it, which is a separate rule and a narrower one:
+//
+//   a merged PR is drawn if and only if something on the graph depends on it.
+//
+// So a merged prerequisite stays, and the trail is drawn whole including the
+// links already walked -- "why can #491 not merge yet" is answered by the shape
+// of the whole chain, and a chain that vanishes as it lands explains nothing. It
+// is TRANSITIVE: a drawn merged PR's own declared prerequisites are on the same
+// trail and are drawn too, so a merge partway along does not truncate the
+// picture at the point it landed. The other half of the rule does the real work
+// of keeping the page readable -- every PR this build fetches is open, so a
+// merged PR nothing depends on is never swept in, and the org's whole merge
+// history does not bury twenty open PRs. See expandMergedTrail().
+//
 // Direction, the one thing this picture must never leave ambiguous:
 //
 //   the graph reads LEFT TO RIGHT. A PR sits to the RIGHT of the things it
@@ -233,26 +247,117 @@ export async function resolveDeps(pr, repoMeta) {
   // 2 + 3. declared edges, same-repo and cross-repo.
   for (const d of parseDeclarations(pr.body, pr.repo)) {
     if (pr.deps.some(e => e.repo === d.repo && e.number === d.number)) continue;
-    const target = await getPr(d.repo, d.number);
-    const edge = {
-      kind: d.crossRepo ? 'cross-repo' : 'implicit',
-      repo: d.repo,
-      number: d.number,
-      url: target ? target.html_url : `https://github.com/${d.repo}/pull/${d.number}`,
-      title: target ? target.title : null,
-      author: target ? target.user.login : null,
-      targetPrivate: Boolean(target && target.base && target.base.repo && target.base.repo.private),
-      crossRepo: d.crossRepo,
-      needsRelease: d.needsRelease,
-      reason: d.reason,
-      declared: d.raw,
-      unreadable: !target,
-      targetState: prState(target)
-    };
-    Object.assign(edge, await resolveStatus(edge, target));
-    pr.deps.push(markAuthor(edge));
+    pr.deps.push(markAuthor(await declaredEdge(d)));
   }
   return pr.deps;
+}
+
+// One parsed declaration, resolved into an edge.
+//
+// The target is looked up BY NUMBER: getPr() is /repos/{repo}/pulls/{number},
+// which answers for a merged or closed PR exactly as it does for an open one.
+// That is deliberately not the query stack detection uses -- openPrsInRepo()
+// lists only OPEN PRs, and so does the candidate sweep -- so a merged target
+// still arrives with its real title, its author and its merged_at instead of
+// degrading to a bare number.
+export async function declaredEdge(d) {
+  const target = await getPr(d.repo, d.number);
+  const edge = {
+    kind: d.crossRepo ? 'cross-repo' : 'implicit',
+    repo: d.repo,
+    number: d.number,
+    url: target ? target.html_url : `https://github.com/${d.repo}/pull/${d.number}`,
+    title: target ? target.title : null,
+    author: target ? target.user.login : null,
+    targetPrivate: Boolean(target && target.base && target.base.repo && target.base.repo.private),
+    crossRepo: d.crossRepo,
+    needsRelease: d.needsRelease,
+    reason: d.reason,
+    declared: d.raw,
+    unreadable: !target,
+    // The fill the target's card gets. Same derivation as any other PR (see
+    // src/state.mjs); a merged target is the whole reason this is read from the
+    // payload rather than assumed to be "open".
+    targetState: prState(target)
+  };
+  Object.assign(edge, await resolveStatus(edge, target));
+  return edge;
+}
+
+// How far the already-merged part of a chain is followed before the build gives
+// up and says so. The seen-set terminates the walk on its own; this only stops a
+// pathological chain from spending the rate limit.
+export const TRAIL_LIMIT = 200;
+
+// THE MERGED-TRAIL RULE.
+//
+//   A merged PR is drawn if and only if something on the graph depends on it.
+//
+// Both halves matter. A merged prerequisite is kept, because the trail a PR is
+// waiting at the end of is the thing this page is for and half a trail explains
+// nothing -- "why is #491 still open" is answered by the whole chain, including
+// the links already done. A merged PR that nothing depends on is NOT drawn: the
+// seed search and the candidate sweep are both `is:open`, so a merged PR only
+// ever arrives as the target of an edge. Sweeping them in would bury twenty open
+// PRs under every PR the org has ever merged.
+//
+// The rule is TRANSITIVE, which is what this walk is for. If a drawn merged PR
+// declared a prerequisite of its own, that prerequisite is part of the same
+// trail and is drawn too -- so the chain is followed backwards through merged
+// PRs until it runs out, and one PR's merge does not silently truncate the
+// picture at the point it landed.
+//
+// THE TRAIL IS MERGED AT BOTH ENDS OF EVERY LINK.
+//
+// Only a merged node extends the trail. An open prerequisite is followed no
+// further from here: the component rule already decides how far open work
+// reaches, and following open PRs out of a merged body as well would pull in
+// chains nothing on the page is joined to.
+//
+// And a merged PR's declaration is followed only to a target that ALSO merged.
+// That is a correctness guard, not tidiness. A declaration in the body of a PR
+// that has since merged is a claim about the past, and if its target is still
+// open then the claim was not honoured -- the PR merged anyway, so the gate was
+// never real. Drawing that edge would put an OPEN card to the LEFT of a merged
+// one and assert it has to merge first, which is not only untrue, it is
+// unsatisfiable. Those stale links are dropped and counted rather than drawn.
+//
+// The consequence worth naming: every node the trail adds is merged, so a column
+// the trail alone fills is genuinely a finished one.
+//
+// `declaredBy(repo, number)` returns the resolved edges that PR declares, which
+// keeps the network out of the control flow and makes the rule testable.
+export async function expandMergedTrail(seeds, declaredBy, limit = TRAIL_LIMIT) {
+  const records = [];
+  const visited = [];
+  const stale = [];
+  const seen = new Set();
+  const queue = (seeds || []).filter(d => d && d.merged);
+  let truncated = false;
+
+  while (queue.length) {
+    const d = queue.shift();
+    const key = `${d.repo}#${d.number}`;
+    // A cycle through merged PRs cannot happen in git, but a body can still
+    // declare one, and the walk must not spin on it.
+    if (seen.has(key)) continue;
+    if (seen.size >= limit) {
+      truncated = true;
+      break;
+    }
+    seen.add(key);
+    visited.push(key);
+
+    const declared = (await declaredBy(d.repo, d.number)) || [];
+    const deps = declared.filter(nd => nd.merged);
+    for (const nd of declared) {
+      if (!nd.merged) stale.push(`${key} -> ${nd.repo}#${nd.number} (${nd.status})`);
+    }
+    if (deps.length) records.push({ repo: d.repo, number: d.number, deps });
+    for (const nd of deps) queue.push(nd);
+  }
+
+  return { records, visited, stale, truncated };
 }
 
 async function main() {
@@ -330,6 +435,8 @@ async function main() {
   };
 
   let graph = null;
+  let feed = [];
+  let trail = { records: [], visited: [], stale: [], truncated: false };
   for (let pass = 1; ; pass++) {
     for (const name of new Set([...pool.values()].map(p => p.repo))) await scanRepo(name);
     for (const p of pool.values()) await resolveDeps(p, repoMeta);
@@ -346,10 +453,8 @@ async function main() {
         onAnEdge.add(`${d.repo}#${d.number}`);
       }
     }
-    graph = buildGraph(
-      [...pool.values()].filter(p => isMine(p.author) || onAnEdge.has(p.key)),
-      isMine
-    );
+    feed = [...pool.values()].filter(p => isMine(p.author) || onAnEdge.has(p.key));
+    graph = buildGraph(feed, isMine, trail.records);
 
     // A cross-repo edge can land in a repo nothing on the page lives in yet, and
     // whatever else is joined to the far end of it belongs to the component too.
@@ -364,6 +469,38 @@ async function main() {
       break;
     }
     for (const r of next) await scanRepo(r);
+  }
+
+  // --- the part of the trail that is already walked ----------------------
+  //
+  // Seeded from the edges of the graph AS IT STANDS, so a merged PR is followed
+  // only when something actually drawn depends on it: a chain the component rule
+  // already dropped is never walked. Merged targets resolve by number, so this
+  // needs no further repo sweeping, and the graph is rebuilt once with the trail
+  // records folded in. See expandMergedTrail().
+  trail = await expandMergedTrail(
+    graph.edges.map(e => e.edge),
+    async (repo, number) => {
+      const target = await getPr(repo, number);
+      if (!target) return [];
+      const out = [];
+      for (const d of parseDeclarations(target.body || '', repo)) {
+        if (out.some(e => e.repo === d.repo && e.number === d.number)) continue;
+        out.push(markAuthor(await declaredEdge(d)));
+      }
+      return out.sort(edgeOrder);
+    }
+  );
+  if (trail.records.length) graph = buildGraph(feed, isMine, trail.records);
+  console.log(
+    `trail: ${trail.visited.length} merged PR(s) walked, ${trail.records.length} of them carrying ` +
+      `prerequisites of their own`
+  );
+  if (trail.truncated) {
+    console.log(`trail: stopped at the ${TRAIL_LIMIT}-node limit, the drawing is incomplete`);
+  }
+  for (const st of trail.stale) {
+    console.log(`trail: not drawn, a merged PR declared something that never landed: ${st}`);
   }
 
   const dupes = duplicateNodes(graph);
@@ -397,7 +534,12 @@ async function main() {
   graph.layout = layoutGraph(graph);
   const groups = groupNodes(graph);
 
-  const withheld = accountWithheld(withheldAll, graph.nodes.map(n => n.pr).filter(Boolean), isMine);
+  const withheld = accountWithheld(
+    withheldAll,
+    graph.nodes.map(n => n.pr).filter(Boolean),
+    isMine,
+    trail.records.flatMap(r => r.deps)
+  );
   console.log(
     `withheld: ${withheld.count} (${withheld.blocking} of them block a PR shown on the page)`
   );
@@ -445,24 +587,35 @@ async function main() {
 }
 
 // Is a prerequisite already met?
+//
+// `merged` and `satisfied` are two different facts and both are reported, which
+// is the same split `state` and `status` already make on a card: a release-gated
+// prerequisite that has landed but not shipped is merged and NOT satisfied. The
+// card is filled as merged because that is what the PR is; the edge stays live
+// because the gate has not opened.
 export async function resolveStatus(edge, target) {
-  if (!target) return { satisfied: false, status: 'unreadable' };
+  if (!target) return { satisfied: false, merged: false, status: 'unreadable' };
 
   if (!target.merged_at) {
-    return { satisfied: false, status: target.state === 'closed' ? 'closed unmerged' : 'open' };
+    return {
+      satisfied: false,
+      merged: false,
+      status: target.state === 'closed' ? 'closed unmerged' : 'open'
+    };
   }
 
-  if (!edge.needsRelease) return { satisfied: true, status: 'merged' };
+  if (!edge.needsRelease) return { satisfied: true, merged: true, status: 'merged' };
 
   // Release-gated: merging is not enough, it needs a published release AFTER
   // the merge landed.
   const releases = await getReleases(edge.repo);
   const after = releases.find(r => new Date(r.publishedAt) > new Date(target.merged_at));
   if (after) {
-    return { satisfied: true, status: `released in ${after.tag}`, release: after };
+    return { satisfied: true, merged: true, status: `released in ${after.tag}`, release: after };
   }
   return {
     satisfied: false,
+    merged: true,
     status: 'merged, awaiting release',
     latestRelease: releases[0] || null
   };
@@ -480,16 +633,20 @@ export async function resolveStatus(edge, target) {
 //
 // `drawn` is every PR record the graph kept, not only mine: somebody else's node
 // can now carry the edge that makes one of my private PRs a blocker.
-export function accountWithheld(withheldPrs, drawn, mine) {
+// `trailDeps` are the edges declared by already-merged PRs on the trail. A merged
+// node has no PR record of its own -- it arrives as an edge target -- so its
+// edges are handed in separately, and they put nodes on the page exactly as a
+// drawn PR's own edges do.
+export function accountWithheld(withheldPrs, drawn, mine, trailDeps = []) {
   const referenced = new Set();
   const blockers = new Set();
-  for (const pr of drawn) {
-    for (const d of pr.deps || []) {
-      const key = `${d.repo}#${d.number}`;
-      referenced.add(key);
-      if (!d.satisfied) blockers.add(key);
-    }
-  }
+  const take = d => {
+    const key = `${d.repo}#${d.number}`;
+    referenced.add(key);
+    if (!d.satisfied) blockers.add(key);
+  };
+  for (const pr of drawn) for (const d of pr.deps || []) take(d);
+  for (const d of trailDeps) take(d);
 
   const key = p => `${p.repo}#${p.number}`;
   const counted = withheldPrs.filter(p => mine(p.author) || referenced.has(key(p)));
@@ -529,7 +686,19 @@ export const edgeOrder = (a, b) =>
 // which is what puts the dashed box and the `◇ not yours · @handle` mark on it,
 // and it gets that mark wherever it sits: prerequisite, dependent, or the root of
 // the whole chain.
-export function buildGraph(prs, mine = () => true) {
+//
+// `trail` carries the merged-trail rule into the graph: each record is
+// `{repo, number, deps}` for a MERGED PR that declared prerequisites of its own.
+// A record is spent only on a PR that is ALREADY a node -- which, since every PR
+// this build fetches is open, means only when something depends on it. So the
+// transitive half cannot pull in a merged PR nothing waits on, and a merged trail
+// node is subject to the component rule like anything else: joined to a component
+// with one of mine in it, or dropped with the rest of it.
+//
+// A merged PR is never `kind: 'own'`, even when it is mine. `own` means one of my
+// OPEN PRs -- the ones that carry CI and that the total at the top counts -- and
+// a merged one is neither. mergedNonPrerequisites() asserts it.
+export function buildGraph(prs, mine = () => true, trail = []) {
   const K = (repo, number) => `${repo}#${number}`;
   const byKey = new Map();
   const nodes = [];
@@ -568,9 +737,8 @@ export function buildGraph(prs, mine = () => true) {
   }
 
   const edges = [];
-  for (const pr of prs) {
-    const to = byKey.get(K(pr.repo, pr.number));
-    for (const d of [...(pr.deps || [])].sort(edgeOrder)) {
+  const attach = (to, d) => {
+    {
       const tk = K(d.repo, d.number);
       // The heart of it: if the target is already a node -- because it is one of
       // mine, or because another of my PRs needs it too -- we attach a second
@@ -595,6 +763,13 @@ export function buildGraph(prs, mine = () => true) {
           // itself is. A release-gated prerequisite can be merged and still not
           // satisfy its edge, so the two are kept apart deliberately.
           state: d.targetState || 'unknown',
+          // The same two facts the drawing reads separately. `merged` decides
+          // whether this card is a link of the trail that is already walked;
+          // `satisfied` decides whether the edge leaving it still holds its
+          // dependent back. A release-gated prerequisite is the first and not
+          // the second.
+          merged: Boolean(d.merged),
+          satisfied: Boolean(d.satisfied),
           edge: d,
           needs: [],
           neededBy: []
@@ -603,6 +778,35 @@ export function buildGraph(prs, mine = () => true) {
       edges.push(e);
       to.needs.push(e);
       from.neededBy.push(e);
+      return from;
+    }
+  };
+
+  for (const pr of prs) {
+    const to = byKey.get(K(pr.repo, pr.number));
+    for (const d of [...(pr.deps || [])].sort(edgeOrder)) attach(to, d);
+  }
+
+  // The transitive half of the merged-trail rule. A trail record is spent only
+  // on a PR that is ALREADY a node, and following it can put new nodes on the
+  // page, which may in turn be trail records themselves -- so this repeats until
+  // nothing new appears rather than assuming the records arrive in chain order.
+  //
+  // It runs BEFORE pruneComponents(), so a merged trail belongs to the component
+  // of the PR that needs it and is kept or dropped with it, in one piece.
+  const trailByKey = new Map((trail || []).map(r => [K(r.repo, r.number), r]));
+  const expanded = new Set();
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const n of [...nodes]) {
+      const rec = trailByKey.get(n.key);
+      if (!rec || expanded.has(n.key)) continue;
+      expanded.add(n.key);
+      grew = true;
+      for (const d of [...rec.deps].sort(edgeOrder)) {
+        if (n.needs.some(e => e.from.key === K(d.repo, d.number))) continue;
+        attach(n, d);
+      }
     }
   }
 

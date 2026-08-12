@@ -6,6 +6,8 @@ import {
   accountWithheld,
   buildGraph,
   componentsOf,
+  declaredEdge,
+  expandMergedTrail,
   decorateEdge,
   duplicateNodes,
   groupNodes,
@@ -473,6 +475,358 @@ await t('every node in the graph appears exactly once as a card of its own', () 
       `${n.key} has one card`
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// THE MERGED-TRAIL RULE: a merged PR is drawn if and only if something on the
+// graph depends on it, transitively.
+// ---------------------------------------------------------------------------
+//
+// `merged` and `satisfied` are separate on purpose. A release-gated prerequisite
+// can be merged and NOT satisfied, and the page has to draw the first while
+// still honouring the second.
+const done = (repo, number, over = {}) =>
+  edge(repo, number, {
+    merged: true,
+    satisfied: true,
+    status: 'merged',
+    targetState: 'merged',
+    ...over
+  });
+const gated = (repo, number, over = {}) =>
+  edge(repo, number, {
+    merged: true,
+    satisfied: false,
+    needsRelease: true,
+    crossRepo: true,
+    status: 'merged, awaiting release',
+    targetState: 'merged',
+    ...over
+  });
+// One trail record: the prerequisites a MERGED PR declared for itself.
+const trailOf = (repo, number, deps) => ({ repo, number, deps });
+
+console.log('the merged trail: kept when something depends on it, dropped when nothing does');
+await t('a merged prerequisite IS drawn, because one of mine depends on it', () => {
+  const g = buildGraph([sp(491, [done(S, 400)])]);
+  const n = at(g, `${S}#400`);
+  assert.ok(n, '#400 is on the graph');
+  assert.equal(n.merged, true);
+  assert.equal(n.satisfied, true);
+  assert.deepEqual(neededBy(n), [`${S}#491`], 'and it is there as the thing #491 waited for');
+});
+await t('NEGATIVE: a merged PR that nothing depends on is not drawn at all', () => {
+  // The other half of the rule, and the half that keeps the page readable: the
+  // root set is my OPEN PRs, so a merged PR only ever arrives as an edge target.
+  const g = buildGraph([sp(491, [done(S, 400)])], () => true, [
+    // A trail record for a merged PR that is NOT on the graph is never spent, so
+    // the transitive rule cannot smuggle in a merged PR nothing waits on.
+    trailOf(S, 777, [done(S, 778)])
+  ]);
+  assert.equal(at(g, `${S}#777`), undefined);
+  assert.equal(at(g, `${S}#778`), undefined);
+  assert.deepEqual(g.nodes.map(n => n.key).sort(), [`${S}#400`, `${S}#491`]);
+});
+await t('TRANSITIVE: a drawn merged PR brings its OWN declared prerequisite with it', () => {
+  // #491 (open) <- #400 (merged) <- #300 (merged). All three links of the trail.
+  const g = buildGraph([sp(491, [done(S, 400)])], () => true, [trailOf(S, 400, [done(S, 300)])]);
+  assert.ok(at(g, `${S}#300`), '#300 is on the trail even though nothing OPEN names it');
+  assert.deepEqual(needs(at(g, `${S}#400`)), [`${S}#300`]);
+  assert.deepEqual(neededBy(at(g, `${S}#300`)), [`${S}#400`]);
+  assert.equal(at(g, `${S}#300`).merged, true);
+});
+await t('...and it keeps going: three merged hops behind one open PR', () => {
+  const g = buildGraph([sp(491, [done(S, 400)])], () => true, [
+    // Deliberately NOT in chain order, so the walk cannot be relying on the
+    // records arriving already sorted.
+    trailOf(S, 300, [done(S, 200)]),
+    trailOf(S, 400, [done(S, 300)])
+  ]);
+  assert.deepEqual(
+    g.nodes.map(n => n.key).sort(),
+    [`${S}#200`, `${S}#300`, `${S}#400`, `${S}#491`]
+  );
+  assert.deepEqual(
+    [at(g, `${S}#200`).rank, at(g, `${S}#300`).rank, at(g, `${S}#400`).rank, at(g, `${S}#491`).rank],
+    [0, 1, 2, 3],
+    'the whole trail is ranked, so the drawing is as long as the chain really is'
+  );
+});
+await t('a merged PR two of mine depend on is still ONE node with two edges', () => {
+  const g = buildGraph([sp(1, [done(S, 400)]), sp(2, [done(S, 400)])]);
+  assert.equal(copies(g, `${S}#400`), 1);
+  assert.deepEqual(duplicateNodes(g), []);
+  assert.deepEqual(neededBy(at(g, `${S}#400`)), [`${S}#1`, `${S}#2`]);
+});
+await t('a merged prerequisite in another repo is drawn, and the edge crosses', () => {
+  const g = buildGraph([sp(491, [done(JS, 1223, { crossRepo: true })])]);
+  assert.ok(at(g, `${JS}#1223`));
+  assert.equal(g.edges[0].edge.crossRepo, true);
+});
+
+console.log('walking the trail: only merged nodes extend it, and the walk terminates');
+const loader = table => async (repo, number) => table[`${repo}#${number}`] || [];
+await t('a merged seed is followed, and what it declares is followed too', async () => {
+  const r = await expandMergedTrail([done(S, 400)], loader({
+    [`${S}#400`]: [done(S, 300)],
+    [`${S}#300`]: [done(S, 200)]
+  }));
+  assert.deepEqual(r.visited, [`${S}#400`, `${S}#300`, `${S}#200`]);
+  assert.deepEqual(r.records.map(x => `${x.repo}#${x.number}`), [`${S}#400`, `${S}#300`]);
+  assert.equal(r.truncated, false);
+});
+await t('NEGATIVE: an OPEN prerequisite heads no chain of its own', async () => {
+  // Following open PRs would pull a stranger's whole backlog onto the page
+  // through one edge. Merged work is finite and already on the trail.
+  const r = await expandMergedTrail([edge(S, 504)], loader({ [`${S}#504`]: [done(S, 400)] }));
+  assert.deepEqual(r.visited, []);
+  assert.deepEqual(r.records, []);
+});
+await t('a merged-but-unreleased prerequisite still extends the trail', async () => {
+  // It is merged, so it is drawn, so what it declared is drawn: satisfied is a
+  // different question from merged and does not gate the walk.
+  const r = await expandMergedTrail([gated(JS, 1222)], loader({ [`${JS}#1222`]: [done(JS, 1100)] }));
+  assert.deepEqual(r.visited, [`${JS}#1222`, `${JS}#1100`]);
+});
+await t('NEGATIVE: a merged PR pointing at something still OPEN is a stale claim, not an edge', async () => {
+  // The PR merged anyway, so that gate was never real. Drawing it would put an
+  // open PR to the LEFT of a merged one and assert it must merge first, which is
+  // both untrue and unsatisfiable.
+  const r = await expandMergedTrail([done(S, 400)], loader({
+    [`${S}#400`]: [done(S, 300), edge(S, 504)]
+  }));
+  assert.deepEqual(r.records[0].deps.map(d => d.number), [300], 'only the merged one is kept');
+  assert.deepEqual(r.stale, [`${S}#400 -> ${S}#504 (open)`], 'and the drop is reported, not hidden');
+  assert.deepEqual(r.visited, [`${S}#400`, `${S}#300`]);
+});
+await t('...so every node the trail adds is itself merged', () => {
+  const g = buildGraph([sp(491, [done(S, 400)])], () => true, [trailOf(S, 400, [done(S, 300)])]);
+  assert.ok(g.nodes.filter(n => n.kind === 'dep').every(n => n.merged));
+});
+await t('a declared cycle between merged PRs terminates instead of spinning', async () => {
+  const r = await expandMergedTrail([done(S, 400)], loader({
+    [`${S}#400`]: [done(S, 300)],
+    [`${S}#300`]: [done(S, 400)]
+  }));
+  assert.deepEqual(r.visited, [`${S}#400`, `${S}#300`]);
+  assert.equal(r.truncated, false);
+});
+await t('one merged PR needed twice is walked once', async () => {
+  const r = await expandMergedTrail([done(S, 400), done(S, 400)], loader({}));
+  assert.deepEqual(r.visited, [`${S}#400`]);
+});
+await t('a runaway chain stops at the limit and SAYS the drawing is incomplete', async () => {
+  const chain = {};
+  for (let i = 1; i < 40; i++) chain[`${S}#${i}`] = [done(S, i + 1)];
+  const r = await expandMergedTrail([done(S, 1)], loader(chain), 5);
+  assert.equal(r.truncated, true);
+  assert.equal(r.visited.length, 5);
+});
+
+console.log('a merged prerequisite reads as DONE, and never as work still to do');
+await t('the card is filled as merged and says so in a word', () => {
+  // The fill comes from the state channel (src/state.mjs); what the trail rule
+  // has to guarantee is that a trail node reaches it with the right state.
+  const g = buildGraph([sp(491, [done(S, 400)])]);
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  assert.equal(at(g, `${S}#400`).state, 'merged', 'the card knows its state');
+  assert.match(html, /<g class="node dep st-merged">/, 'so it is filled as merged');
+  assert.match(html, /<text class="st"[^>]*>● merged<\/text>/, 'and says so, not only in ink');
+});
+await t('merged and satisfied are consistent with the state channel, and cannot drift', () => {
+  // Two derivations of one fact -- resolveStatus() sets `merged`, prState() sets
+  // `state` -- so they are pinned against each other.
+  const g = buildGraph([sp(491, [done(S, 400), gated(JS, 1222)])]);
+  for (const n of g.nodes.filter(x => x.kind === 'dep'))
+    assert.equal(n.merged, n.state === 'merged', `${n.key}: merged and state agree`);
+  assert.equal(at(g, `${JS}#1222`).merged, true, 'gated: merged...');
+  assert.equal(at(g, `${JS}#1222`).satisfied, false, '...and not satisfied');
+});
+await t('the met edge gets the met ARROWHEAD as well as the met line', () => {
+  // A marker does not inherit the stroke of the path that references it, so a
+  // met edge with the default head came out as a light line ending in a
+  // full-weight point. Hence a second <marker> def rather than a class.
+  const g = buildGraph([sp(491, [done(S, 400)])]);
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  assert.match(html, /<marker id="dep-arrow-met"/, 'the met arrowhead is defined');
+  assert.match(html, /<path class="edge met"[^>]*marker-end="url\(#dep-arrow-met\)"/);
+  assert.match(html, /\.ahead\.met\{fill:var\(--muted\)\}/, 'in the same ink as the met line');
+  assert.match(html, />✓ MET</, 'and the edge is labelled, so it is not colour alone');
+});
+await t('the hover text says already merged, in full words', () => {
+  // With the per-PR list gone the card title IS the detail surface, so the fact
+  // has to be there in words and not only in the fill.
+  const g = buildGraph([sp(491, [done(S, 400)])]);
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  assert.match(html, /already merged — drawn because something here still depends on it/);
+  assert.match(html, /nothing is waiting on it any more/);
+});
+await t('CRUCIAL: its dependent is not described as held back by it', () => {
+  const g = buildGraph([sp(491, [done(S, 400)])]);
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  const svg = html.slice(html.indexOf('<svg'), html.indexOf('</svg>'));
+  assert.doesNotMatch(svg, /blocked|waiting for|still needs|cannot merge/i,
+    'nothing in the drawing says #491 is held back');
+  assert.match(svg, /merges after stamp#400/, 'the edge is stated, in the past tense');
+  assert.doesNotMatch(html, /ready to merge|safe to merge|merge it now/i,
+    'and the absence of a blocker is never turned into advice');
+});
+await t('the text alternative names the merged cards and says why they are drawn', () => {
+  const g = buildGraph([sp(491, [done(S, 400)])]);
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  assert.match(html, /1 of these has already merged and is drawn because something here still depends on it: stamp#400/);
+  assert.match(html, /Each of those is a wait that is already over/);
+  assert.match(html, /Column 1 of 2, which has already merged, holds 1 pull request: stamp#400/);
+});
+await t('a merged-but-unreleased prerequisite does NOT let its dependent look ready', () => {
+  const g = buildGraph([sp(491, [gated(JS, 1222)])]);
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  const svg = html.slice(html.indexOf('<svg'), html.indexOf('</svg>'));
+  const n = at(g, `${JS}#1222`);
+  assert.deepEqual([n.merged, n.satisfied], [true, false]);
+  assert.match(html, /<g class="node dep st-merged">/, 'filled as merged, because it IS merged');
+  assert.match(html, /the merge landed and the gate has not opened, so it is still in the way/);
+  assert.doesNotMatch(svg, /class="edge cross met"/, 'and its edge is NOT drawn as met');
+  assert.doesNotMatch(svg, /marker-end="url\(#dep-arrow-met\)"/, 'nor given the met arrowhead');
+  assert.doesNotMatch(svg, />✓ MET</, 'nor labelled as met');
+  assert.match(svg, />GATED</, 'the gate is still labelled on the edge');
+});
+await t('a mix of one merged and one open prerequisite keeps the open arrow live', () => {
+  const g = buildGraph([sp(491, [done(S, 400), edge(S, 504)])]);
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  assert.equal(occurrences(html, 'class="edge met"'), 1, 'exactly one met edge');
+  assert.equal(occurrences(html, 'class="edge"'), 1, 'and one that is still live');
+});
+await t('a column of nothing but merged PRs is not labelled MERGES FIRST', () => {
+  // It has no merge in its future. Predicting one for finished work would be
+  // the same mistake as drawing it as work still to do.
+  const g = buildGraph([sp(491, [done(S, 400)])]);
+  g.layout = layoutGraph(g);
+  assert.deepEqual(g.layout.columns.map(c => c.label), ['ALREADY MERGED', 'MERGES LAST']);
+  assert.equal(g.layout.columns[0].sub, 'this part is done');
+  assert.match(page(g), /<g class="colhead done">/);
+});
+await t('...but one open PR in that column is enough to keep the ordinary label', () => {
+  const g = buildGraph([sp(491, [done(S, 400), edge(S, 504)]), sp(504)]);
+  g.layout = layoutGraph(g);
+  assert.deepEqual(g.layout.columns.map(c => c.label), ['MERGES FIRST', 'MERGES LAST']);
+  assert.equal(g.layout.columns[0].allMerged, false);
+});
+await t('columnLabel says it plainly on its own', () => {
+  assert.deepEqual(columnLabel(0, 2, 3, true, true), {
+    label: 'ALREADY MERGED',
+    sub: 'this part is done',
+    note: '3 PRs · any order'
+  });
+  assert.equal(columnLabel(0, 2, 3, true, false).label, 'MERGES FIRST');
+});
+
+console.log('the merged trail and the component rule');
+await t("a merged PR by another author keeps 'not yours' AND gains the merged marking", () => {
+  const g = buildGraph(
+    [sp(2222, [done('snapshot-labs/sx-monorepo', 2219, { author: 'wa0x6e', foreign: true })],
+      'snapshot-labs/sx-monorepo')],
+    mine
+  );
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  assert.match(html, /@wa0x6e — not yours to merge/, 'the authorship marking survives being merged');
+  assert.match(html, /<g class="node dep st-merged">/, 'filled by state...');
+  assert.match(html, /<text class="st"[^>]*>● merged<\/text>/, '...and it says merged');
+  assert.match(html, /<tspan class="g">◇<\/tspan> @wa0x6e<\/text>/, 'AND whose it is');
+  assert.match(html, /\.node\.dep \.box\{stroke-dasharray:4 3\}/,
+    'so it stays dashed: merged does not make a colleague\'s PR yours');
+  assert.match(html, /already merged — drawn because something here still depends on it/);
+});
+await t('...and it is never kind:own, so it is not counted as an open PR', () => {
+  // A merged card CAN be the leftmost thing in the picture under the component
+  // rule, and that is fine. What it can never be is one of the author's OPEN
+  // PRs: `own` is what carries CI and what the total at the top counts.
+  const p = sp(2222, [done('snapshot-labs/sx-monorepo', 2219, { author: 'wa0x6e', foreign: true })],
+    'snapshot-labs/sx-monorepo');
+  const g = buildGraph([p], mine);
+  const [group] = groupNodes(g);
+  assert.deepEqual(group.mine.map(n => n.number), [2222]);
+  assert.deepEqual(group.referenced.map(n => n.number), [2219]);
+  assert.equal(group.count, 1, 'a merged prerequisite is not counted in the open set');
+  assert.equal(at(g, 'snapshot-labs/sx-monorepo#2219').kind, 'dep');
+  assert.match(page(g), /1 open PR/);
+});
+await t('a merged trail node joins the component of the PR that needs it', () => {
+  // The trail is expanded BEFORE components are pruned, so a merged chain is
+  // part of the component it hangs off rather than a stray piece of its own.
+  const g = buildGraph([sp(491, [done(S, 400)])], mine, [trailOf(S, 400, [done(S, 300)])]);
+  assert.equal(componentsOf(g.nodes).length, 1, 'one component, four links long');
+  assert.deepEqual(g.pruned, []);
+  assert.deepEqual(
+    componentsOf(g.nodes)[0].map(n => n.number).sort((a, b) => a - b),
+    [300, 400, 491]
+  );
+});
+await t('NEGATIVE: a merged trail in a component with none of mine is dropped whole', () => {
+  // The component rule outranks the trail rule. A merged chain hanging off
+  // somebody else's unrelated PR is not a reason to draw either of them.
+  const notMine = { author: 'someone-else', foreign: true };
+  const theirs = sp(900, [done(S, 800, notMine)], S);
+  theirs.author = 'someone-else';
+  const g = buildGraph([sp(491), theirs], mine, [trailOf(S, 800, [done(S, 700, notMine)])]);
+  assert.deepEqual(g.nodes.map(n => n.number), [491]);
+  assert.deepEqual(g.pruned, [`${S}#700`, `${S}#800`, `${S}#900`].sort());
+});
+await t('...but a merged PR of MINE anchors its component, like any PR of mine', () => {
+  // Wan's rule is "one node from the graph is yours", and a PR I merged is
+  // mine. In the real build this cannot widen anything, because the trail is
+  // only walked from edges of a graph that has already been pruned.
+  const theirs = sp(900, [done(S, 800)], S);
+  theirs.author = 'someone-else';
+  const g = buildGraph([theirs], mine);
+  assert.deepEqual(g.nodes.map(n => n.number).sort((a, b) => a - b), [800, 900]);
+  assert.deepEqual(g.pruned, []);
+});
+await t('a merged PR of MINE on the trail is referenced, never listed as open work', () => {
+  // It is mine, so it is not badged "not yours" -- but it is merged, so it is
+  // not one of my OPEN PRs either, and the open count must not move.
+  const g = buildGraph([sp(491, [done(S, 400)])], mine);
+  const [group] = groupNodes(g);
+  assert.deepEqual(group.mine.map(n => n.number), [491]);
+  assert.deepEqual(group.referenced.map(n => n.number), [400]);
+  assert.equal(group.count, 1);
+  assert.doesNotMatch(page(g), /not yours · @tony8713/);
+});
+await t('a merged PR reached only through the trail is still never a root', () => {
+  const g = buildGraph([sp(491, [done(S, 400)])], mine, [trailOf(S, 400, [done(S, 300)])]);
+  const [group] = groupNodes(g);
+  assert.equal(group.count, 1, 'still one open PR');
+  assert.deepEqual(group.referenced.map(n => n.number), [300, 400]);
+  assert.ok(group.referenced.every(n => n.kind === 'dep'));
+});
+await t('a withheld PR reached only through the trail is still counted', () => {
+  const r = accountWithheld(
+    [wh('snapshot-labs/laser', 86, 'tony8713')],
+    [sp(491, [done(S, 400)])],
+    mine,
+    [edge('snapshot-labs/laser', 86, { crossRepo: true })]
+  );
+  assert.deepEqual([r.count, r.referenced, r.blocking], [1, 1, 1]);
+});
+await t('NEGATIVE: the merged trail prints no private repo name anywhere', () => {
+  const g = buildGraph([sp(491, [done(S, 400)])], mine, [
+    trailOf(S, 400, [
+      done('snapshot-labs/a-private-repo', 9, { crossRepo: true, title: null, author: null, hidden: true })
+    ])
+  ]);
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  assert.ok(at(g, 'snapshot-labs/a-private-repo#9'), 'the node exists');
+  assert.doesNotMatch(html, /a-private-repo#9/, 'but never as a ref');
+  assert.match(html, /<text class="ref" [^>]*>#9<\/text>/, 'the box shows the number only');
 });
 
 console.log('rank = dependency depth');
@@ -1608,6 +1962,55 @@ if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) {
       const p = await getPr(RJS, number);
       assert.equal(prState(p) === 'merged', p.merged, `#${number}`);
     }
+  });
+  await t('merged and satisfied are reported as the two different facts they are', async () => {
+    const open = await resolveStatus({ repo: RJS, needsRelease: false }, await getPr(RJS, 1225));
+    assert.deepEqual([open.merged, open.satisfied], [false, false]);
+    const shipped = await resolveStatus({ repo: RJS, needsRelease: true }, await getPr(RJS, 1223));
+    assert.deepEqual([shipped.merged, shipped.satisfied], [true, true]);
+    // merged, and STILL in the way: this is the pair the drawing depends on.
+    const gatedLive = await resolveStatus({ repo: RJS, needsRelease: true }, await getPr(RJS, 1222));
+    assert.deepEqual([gatedLive.merged, gatedLive.satisfied], [true, false]);
+  });
+
+  console.log('resolving a merged target by number (live API)');
+  await t('a MERGED PR that is in nobody\'s open set still resolves title, author and state', async () => {
+    // The open-PR listing that stack detection uses cannot see #1222 at all --
+    // it is merged. Resolving by number can, so a merged prerequisite arrives
+    // with its real title instead of degrading to a bare number.
+    const e = await declaredEdge({
+      repo: RJS,
+      number: 1222,
+      crossRepo: true,
+      needsRelease: false,
+      reason: null,
+      raw: `Depends on ${RJS}#1222`
+    });
+    assert.equal(e.unreadable, false);
+    assert.ok(e.title && e.title.length > 0, `title resolved: ${e.title}`);
+    assert.ok(e.author && e.author.length > 0, `author resolved: ${e.author}`);
+    assert.equal(e.merged, true);
+    assert.equal(e.satisfied, true);
+    assert.equal(e.status, 'merged');
+    assert.equal(e.url, `https://github.com/${RJS}/pull/1222`);
+  });
+  await t('and it draws as a finished card once something depends on it', async () => {
+    const dep = await declaredEdge({
+      repo: RJS,
+      number: 1222,
+      crossRepo: true,
+      needsRelease: false,
+      reason: null,
+      raw: ''
+    });
+    const g = buildGraph([sp(491, [decorateEdge(dep, mine, false)])], mine);
+    g.layout = layoutGraph(g);
+    const html = page(g);
+    assert.equal(at(g, `${RJS}#1222`).merged, true);
+    assert.equal(at(g, `${RJS}#1222`).state, 'merged', 'and the fill knows it too');
+    assert.match(html, /<text class="st"[^>]*>● merged<\/text>/);
+    assert.match(html, /already merged — drawn because something here still depends on it/);
+    assert.match(html, /<path class="edge cross met"/, 'and its edge is drawn met');
   });
 } else {
   console.log('release gating (live API)  SKIPPED - no GH_TOKEN');

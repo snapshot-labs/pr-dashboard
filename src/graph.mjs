@@ -319,6 +319,15 @@ export function nodeTitleText(n) {
   } else if (n.hidden) bits.push('private repo, details withheld');
   else if (!n.author) bits.push('author unknown');
   else if (n.foreign) bits.push(`@${n.author} — not yours to merge`);
+  // Said in full words. The hover text is where a reader gets the detail back
+  // now that the per-PR list is gone, and "already merged" is the detail that
+  // decides whether a card to the left is still in anybody's way.
+  if (n.merged)
+    bits.push(
+      n.satisfied
+        ? 'already merged — drawn because something here still depends on it, and nothing is waiting on it any more'
+        : 'already merged, but release-gated: the merge landed and the gate has not opened, so it is still in the way'
+    );
   if (n.status) bits.push(n.status);
 
   const live = (n.needs || []).filter(e => !e.cycle);
@@ -479,15 +488,19 @@ export function layoutGraph(graph) {
   const width = colX(maxRank) + NODE_W + PAD;
   const height = bottom + PAD;
 
-  const columns = ordered.map((list, r) => ({
-    rank: r,
-    x: colX(r),
-    width: NODE_W,
-    top,
-    count: list.length,
-    unordered: census.unordered(r),
-    ...columnLabel(r, maxRank, list.length, census.unordered(r))
-  }));
+  const columns = ordered.map((list, r) => {
+    const allMerged = list.length > 0 && list.every(n => n.merged);
+    return {
+      rank: r,
+      x: colX(r),
+      width: NODE_W,
+      top,
+      count: list.length,
+      unordered: census.unordered(r),
+      allMerged,
+      ...columnLabel(r, maxRank, list.length, census.unordered(r), allMerged)
+    };
+  });
 
   return { width, height, columns, left, top, maxRank, laneH: LANE_H };
 }
@@ -499,12 +512,18 @@ export function layoutGraph(graph) {
 // to be misread about, and it is only claimed for a column that is genuinely
 // unordered -- see rankCensus(). With the per-PR list gone this header is the
 // ONLY place the rank of a PR is stated, which is why it stays.
-export function columnLabel(r, maxRank, count, unordered = true) {
+// `allMerged` is the merged-trail case. A column made entirely of PRs that have
+// already landed has no merge left in its future, so heading it MERGES FIRST
+// would be a prediction about finished work -- the same mistake as drawing it as
+// work still to do. One open PR in the column is enough to keep the ordinary
+// label, because the order it names is still real for that one.
+export function columnLabel(r, maxRank, count, unordered = true, allMerged = false) {
   const note = !unordered
     ? `${count} PR${count === 1 ? '' : 's'} · a cycle is cut here`
     : count === 1
       ? '1 PR'
       : `${count} PRs · any order`;
+  if (allMerged) return { label: 'ALREADY MERGED', sub: 'this part is done', note };
   if (maxRank === 0) return { label: 'NO ORDER TO KEEP', sub: 'nothing waits on anything', note };
   if (r === 0) return { label: 'MERGES FIRST', sub: 'nothing to wait for', note };
   if (r === maxRank) return { label: 'MERGES LAST', sub: 'waits on the rest', note };
@@ -574,10 +593,28 @@ export function graphDesc(graph) {
       ' landed.',
     'The whole structure follows, in words.'
   ];
+  // The merged cards, named as a set. A reader who is not looking at the picture
+  // needs to know that some of what follows is finished work and why it is here
+  // at all, before they read a column list that mixes the two.
+  const merged = graph.nodes.filter(n => n.merged);
+  if (merged.length) {
+    parts.splice(
+      parts.length - 1,
+      0,
+      `${merged.length} of these ${merged.length === 1 ? 'has' : 'have'} already merged and` +
+        ` ${merged.length === 1 ? 'is' : 'are'} drawn because something here still depends on` +
+        ` ${merged.length === 1 ? 'it' : 'them'}: ` +
+        merged.map(descRef).join(', ') +
+        `. Each of those is a wait that is already over: the card is drawn so the chain behind an` +
+        ` open pull request can be read whole, not because anything is still held up by it.`
+    );
+  }
 
   ranks.forEach((list, r) => {
-    const where =
-      total === 1
+    const allMerged = list.length > 0 && list.every(n => n.merged);
+    const where = allMerged
+      ? `Column ${r + 1} of ${total}, which has already merged,`
+      : total === 1
         ? 'The only column'
         : r === 0
           ? `Column 1 of ${total}, which merges first,`
@@ -588,6 +625,9 @@ export function graphDesc(graph) {
       list.length === 1
         ? 'holds 1 pull request'
         : `holds ${list.length} pull requests, in any order among themselves`;
+    // descRef() already names each card's state as well as its author, so a
+    // column that is only PARTLY merged says which of its cards are finished
+    // without any extra suffix here.
     parts.push(`${where} ${how}: ${list.map(descRef).join(', ')}.`);
   });
 
@@ -645,11 +685,14 @@ export function graphSvg(graph, ids = {}) {
       ` ${plural(edges.length, 'dependency edge')}</title>`
   );
   out.push(`<desc id="${dId}">${esc(graphDesc(graph))}</desc>`);
-  out.push(
-    '<defs><marker id="dep-arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="9"' +
-      ' markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">' +
-      '<path class="ahead" d="M0 0 L10 5 L0 10 Z" fill="currentColor"/></marker></defs>'
-  );
+  // Two arrowheads, because an SVG marker does not inherit the stroke of the path
+  // that references it: the met one is the same shape in the satisfied ink, so an
+  // already-walked link of the trail is one consistent colour end to end.
+  const marker = (id, cls) =>
+    `<marker id="${id}" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="9"` +
+    ' markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">' +
+    `<path class="${cls}" d="M0 0 L10 5 L0 10 Z" fill="currentColor"/></marker>`;
+  out.push(`<defs>${marker('dep-arrow', 'ahead')}${marker('dep-arrow-met', 'ahead met')}</defs>`);
 
   // The column headers, which is where the rank labels live now that a rank is a
   // column: MERGES FIRST sits at the left end of the canvas, MERGES LAST at the
@@ -657,7 +700,7 @@ export function graphSvg(graph, ids = {}) {
   // the column standing under it.
   for (const c of L.columns) {
     out.push(
-      `<g class="colhead">` +
+      `<g class="colhead${c.allMerged ? ' done' : ''}">` +
         `<text class="rk" x="${c.x}" y="${PAD + 11}" font-size="9">${esc(c.label)}</text>` +
         `<text class="rksub" x="${c.x}" y="${PAD + 24}" font-size="9">${esc(c.sub)}</text>` +
         `<text class="rknote${c.unordered ? '' : ' cyc'}" x="${c.x}" y="${PAD + 36}"` +
@@ -720,7 +763,8 @@ export function graphSvg(graph, ids = {}) {
     out.push(
       `<g class="edgeg"><title>${esc(edgeTitleText(e))}</title>` +
         `<path class="${cls.join(' ')}" fill="none" stroke="currentColor" stroke-width="1.5"` +
-        ` marker-end="url(#dep-arrow)" d="M${sx} ${sy} C ${mid} ${sy}, ${mid} ${ty}, ${tx} ${ty}"/>` +
+        ` marker-end="url(#dep-arrow${e.edge.satisfied ? '-met' : ''})"` +
+        ` d="M${sx} ${sy} C ${mid} ${sy}, ${mid} ${ty}, ${tx} ${ty}"/>` +
         `${gate}${met}</g>`
     );
   }
@@ -810,12 +854,18 @@ svg.depgraph .edge.cross{stroke-dasharray:5 4}
    notice rather than one they can read. */
 svg.depgraph .edge.met{stroke:var(--muted)}
 svg.depgraph .ahead{fill:var(--ink2)}
+/* The arrowhead has to lighten with its line: an SVG marker does not inherit the
+   stroke of the path that references it, so a met edge that kept the default
+   head came out as a light line with a full-weight point on the end of it. Hence
+   the second <marker> def rather than a class on the path. */
+svg.depgraph .ahead.met{fill:var(--muted)}
 /* the column header: rank name, what it waits for, and how many PRs stand under
    it with no order between them */
 svg.depgraph .rk{font:700 9px ui-sans-serif,system-ui,sans-serif;letter-spacing:.06em;fill:var(--ink2)}
 svg.depgraph .rksub{font:9px ui-sans-serif,system-ui,sans-serif;fill:var(--muted)}
 svg.depgraph .rknote{font:9px ui-sans-serif,system-ui,sans-serif;fill:var(--ink2)}
 svg.depgraph .rknote.cyc{fill:var(--critical-ink)}
+svg.depgraph .colhead.done .rk,svg.depgraph .colhead.done .rksub{fill:var(--good-ink)}
 svg.depgraph .rkrule{stroke:var(--rule)}
 svg.depgraph .elabel{font:700 8.5px ui-sans-serif,system-ui,sans-serif;letter-spacing:.06em;
   fill:var(--serious-ink);paint-order:stroke;stroke:var(--surface);

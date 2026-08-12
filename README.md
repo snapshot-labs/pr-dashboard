@@ -93,10 +93,16 @@ Three markers survive, each with a legend entry under the drawing, because each 
 
 | Marker | Where | Means |
 |---|---|---|
+| `✓ merged` | on a card | already landed; this link of the trail is done, see below |
+| `~ merged, awaiting release` | on a card | it landed and it is *still* in the way |
 | `◇ @handle` | on a card | not `PR_AUTHOR`'s PR, so not theirs to merge |
 | dashed outline | on a card | not one of `PR_AUTHOR`'s open PRs: somebody else's, or a prerequisite of theirs that has already merged |
 | `⊘ …` | on a card | the PR's **own title** says do not merge |
 | `GATED` | on an **edge** | release-gated: a published release clears it, a merge does not |
+
+`✓ merged` is the one marker that displaces another: a merged card never lifts a stale `⊘` out of
+its title, because a do-not-merge warning on finished work reads as a live one. It does *not*
+displace `◇ @handle` — merged and not-yours are independent, and a colleague's merged PR says both.
 
 `⊘` is lifted *out* of the title (`splitHold()`), so a long title can never truncate a
 `[DO NOT MERGE until migration is run]` away and leave the PR reading as ready. The bracket is still
@@ -197,7 +203,9 @@ already gone away, which is merge-order information. It is always the *target* o
 card of its own, and `mergedNonPrerequisites()` fails the build rather than ship a page where one got
 in some other way. Sweeping in every merged PR in the org would bury the open ones under hundreds of
 finished ones. The arrow leaving one is toned down and labelled `✓ MET`, because a merged card with
-an ordinary arrow on it reads as a live blocker.
+an ordinary arrow on it reads as a live blocker. It is not only the *direct* prerequisite either:
+whatever a drawn merged PR declared for itself is on the same trail and is drawn too — see
+*Merged PRs, and the whole trail* below.
 
 **Merged is not the same as satisfied.** A release-gated prerequisite can be merged and still be
 blocking: the card is filled merged because that is what the PR *is*, while the edge keeps its
@@ -283,6 +291,72 @@ A prerequisite in **another repo** that is one of your own PRs is the *same node
 one box, drawn once, with an arrow that crosses the repo boundary. That is what changed — it used to
 be a leaf copy plus a footnote.
 
+## Merged PRs, and the whole trail
+
+**A merged PR is drawn if and only if something on the graph depends on it.** One rule, two halves,
+both load-bearing.
+
+*It is kept.* The question this page answers is "why is that PR still open", and the answer is the
+shape of the whole chain behind it, including the links already done. A trail that erases itself as
+it lands leaves you looking at a stump.
+
+*It is transitive.* If a merged PR drawn here declared a prerequisite of its own, that one is on the
+same trail and is drawn too. `expandMergedTrail()` walks backwards through merged PRs until it runs
+out, so a merge partway along a chain does not truncate the picture at the point it landed. Only a
+**merged** node extends the trail: an open prerequisite heads no chain of its own here, because
+following those would pull a stranger's whole backlog onto the page through one edge.
+
+*Nothing else is kept.* A merged PR that nothing here depends on is not drawn. The seed set is your
+**open** PRs, so a merged PR only ever arrives as the target of an edge; every PR you ever merged in
+the org would bury the twenty open ones this page exists to order. `buildGraph()` spends a trail
+record only on a PR that is *already* a node, so the transitive half cannot smuggle one in either.
+
+**The trail is merged at both ends of every link.** A merged PR's declaration is followed only to a
+target that also merged. A declaration in a PR that has since merged is a claim about the past, and
+if its target is still open the claim was never honoured — the PR merged anyway, so that gate was
+not real. Drawing the link would put an open card to the *left* of a merged one and assert it must
+merge first, which is not just untrue but unsatisfiable. Stale links are dropped and each one is
+named in the build log.
+
+**It reads as done, never as work still to do.**
+
+- The card is **filled as `merged`** by the state channel (see *What a card shows*), and prints
+  `● merged` beside its ref, so none of it rests on telling one colour from another. A merged
+  target reaches that channel with the right state because `declaredEdge()` carries `targetState`.
+- The **arrow leaving it is lighter and labelled `✓ MET`** — and it gets the met **arrowhead** too.
+  An SVG marker does not inherit the stroke of the path that references it, so a met edge with the
+  default head came out as a light line ending in a full-weight point; hence two `<marker>` defs.
+- A column of nothing but merged PRs is headed `ALREADY MERGED · this part is done` rather than
+  `MERGES FIRST`, which would be a prediction about finished work.
+- The hover text and the SVG `<desc>` say it in full words, which matters more than usual now that
+  the per-PR list is gone and the drawing is the only surface. `<desc>` names the merged cards as a
+  set before it lists the columns, and marks them individually in a column that is only part merged.
+- Nothing downstream is described as held back by it.
+
+`merged` and `satisfied` are separate facts and both are carried — the same split `state` and
+`status` already make. A release-gated prerequisite that merged but has not shipped is filled as
+**merged**, because that is what the PR is, **and** still holds its dependent: its edge keeps the
+`GATED` label, is not lightened, and gets no `✓ MET`. A test pins `n.merged === (n.state ===
+'merged')` so the two derivations cannot drift.
+
+**Merged and *not yours* stay independent channels** — fill for state, dashes for authorship. A
+colleague's merged PR is an ordinary satisfied prerequisite: it keeps the dashed outline and the
+`◇ @handle` marker on top of the merged fill, and neither reading cancels the other.
+
+**It sits under the component rule, not beside it.** The trail is expanded *before*
+`pruneComponents()` runs, so a merged chain belongs to the component of the PR that needs it and is
+kept or dropped with it in one piece — a merged chain hanging off a component with none of yours in
+it is not drawn. And a merged card is never `kind: 'own'` even when it is yours: `own` means one of
+your *open* PRs, the ones that carry CI and that the total at the top counts, and
+`mergedNonPrerequisites()` fails the build if a merged PR ever gets in another way. Under the
+component rule a merged card *can* be the leftmost thing in the picture, which is correct; what it
+cannot be is counted as open work.
+
+A merged prerequisite is resolved **by number** (`GET /repos/{repo}/pulls/{number}`), not out of the
+open-PR listing that explicit stacks are computed from — that listing cannot see a merged PR at all.
+So a merged target keeps its real title, author and merge state instead of degrading to a bare
+number.
+
 ## Declaring a dependency
 
 The syntax is documented **on the page itself** (top of the dashboard), which is the copy that
@@ -323,7 +397,7 @@ and not "this PR is fine".
 
 ```sh
 GH_TOKEN=$(gh auth token) node build.mjs   # writes dist/index.html
-GH_TOKEN=$(gh auth token) node test.mjs    # 88 tests
+GH_TOKEN=$(gh auth token) node test.mjs    # unit + live-API tests
 python3 -m http.server -d dist             # look at it
 ```
 

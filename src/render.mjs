@@ -276,7 +276,14 @@ the full title and the edges it sits on.</p>
     PR is <em>ready</em>; that is what the arrows say. Every card also prints its state as a glyph
     and a word beside its ref, so none of it rests on telling one colour from another. A
     <strong>merged</strong> card is only ever a prerequisite that has already landed — this page
-    lists open PRs, and a merged one is drawn only when something open still points at it.</li>
+    lists open PRs, and a merged one is drawn only when something here still depends on it.</li>
+<li><strong>The whole trail is drawn, including the part already walked.</strong> A merged
+    prerequisite stays, and so does whatever <em>it</em> declared, so the chain behind an open PR is
+    shown end to end instead of starting halfway along. The arrow leaving a merged card is lighter
+    and labelled <code>✓ MET</code>: it records a wait that is <em>over</em>, and the PR at its head
+    is not held back by it. A column of nothing but merged cards is headed
+    <code>ALREADY MERGED</code>. A merged PR that <em>nothing</em> here depends on is not drawn at
+    all — this page is about what merges next.</li>
 </ul>
 </details>
 
@@ -314,6 +321,30 @@ not ${esc(author)}'s and so hid what the rest of it was waiting for. The bound d
 nothing is on this page that a declared dependency does not join, transitively, to a PR of
 ${esc(author)}'s. Being recent, or in the same repo, or interesting, brings a PR no closer to being
 drawn.</p>
+<p><strong>Merged PRs, and the whole trail.</strong> One rule decides them:
+<em>a merged PR is drawn if and only if something on this graph depends on it.</em> A prerequisite
+that has landed is <strong>kept</strong> — because the question this page answers, why is that PR
+still open, is answered by the shape of the whole chain, and a chain that erases itself as it lands
+answers nothing. It is <strong>transitive</strong>: if a merged PR drawn here declared a prerequisite
+of its own, that one is on the same trail and is drawn too, so a merge partway along does not
+truncate the picture. The other half of the rule keeps the page usable — every PR this build fetches
+is open, so a merged PR that <em>nothing</em> here depends on is never picked up, and the org's whole
+merge history does not bury the twenty open PRs this page exists to order.</p>
+<p>The trail is merged at both ends of every link. A merged PR's declaration is followed only to a
+target that <em>also</em> merged: a declaration in a PR that has since merged is a claim about the
+past, and if its target is still open then the claim was never honoured — the PR merged anyway, so
+that gate was not real. Drawing the link would put an open card to the <em>left</em> of a merged one
+and assert it has to merge first, which is not just untrue but unsatisfiable. Those stale links are
+dropped, and the build log names each one rather than hiding it.</p>
+<p>A merged card sits under the chain rule like any other: it is drawn as part of the component that
+needs it, and dropped with that component if none of <code>${esc(author)}</code>'s PRs is anywhere in
+it. It is never counted in the open-PR total at the top, because it is not open — and if it is
+somebody else's it keeps its dashed outline and its <code>◇ @handle</code> marker on top of the
+merged fill, because <em>whose</em> and <em>what state</em> are two separate channels and neither is
+allowed to cancel the other.</p>
+<p>A merged prerequisite is resolved <em>by number</em>, not out of the open-PR listing that explicit
+stacks and the candidate sweep are computed from — that listing cannot see a merged PR at all — so it
+keeps its real title, author and state instead of degrading to a bare number.</p>
 <p>Parsing rules, so prose never becomes an edge: the line must <strong>start</strong> with
 <code>Depends on</code> (a leading <code>-</code> bullet is fine); lines inside fenced code blocks are
 ignored; and <strong>blockquoted lines are ignored</strong>, so quoting another PR body — or a
