@@ -86,6 +86,13 @@ card is as tall as its own title. The ref stays, because it is how people refer 
 **The card is filled by the PR's state** — open, draft or merged. See
 [What a card's colour means](#what-a-cards-colour-means).
 
+**The card is a link to the PR, and it opens in a new tab.** It is an SVG 2 `<a>`, so a plain
+`href` with `target="_blank"` and `rel="noopener"` — the same attributes an HTML anchor takes, no
+`xlink`. New tab because the graph is a thing you come back to and reading it costs a scroll;
+`noopener` because this page is public, and a tab we opened should not get a window handle back to
+it. A card in a private repo is not a link at all: the `href` would carry the repo name the rest of
+the card is careful not to print.
+
 Everything else that was a status label is **off the card**: CI wording, the rank badge, the
 `no prerequisites` / `blocked ×N` pair. None of them is a dependency or a merge order, and together
 they were most of the card. `draft` was one of them and came back as a fill, which costs no line.

@@ -798,7 +798,17 @@ export function graphSvg(graph, ids = {}) {
     });
     // A withheld target is not linked: the href would carry the repo name the
     // rest of the card is careful not to print.
-    const body = n.hidden ? inner.join('') : `<a href="${esc(n.url)}">${inner.join('')}</a>`;
+    //
+    // This is an SVG 2 <a>, so the link is a plain href and takes the same
+    // target/rel/download attributes an HTML anchor does -- no xlink:href, and
+    // so no xlink:show either. The card opens GitHub in a new tab: the graph is
+    // a place you come back to, and a whole page of dependencies is expensive to
+    // lose to a click. rel="noopener" goes with it because this page is served
+    // publicly, and a tab we opened has no business holding a window handle back
+    // to the one that opened it.
+    const body = n.hidden
+      ? inner.join('')
+      : `<a href="${esc(n.url)}" target="_blank" rel="noopener">${inner.join('')}</a>`;
     out.push(
       `<g class="node ${n.kind === 'own' ? 'own' : 'dep'} ${c.state.cls}">` +
         `<title>${esc(nodeTitleText(n))}</title>${body}</g>`

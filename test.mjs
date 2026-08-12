@@ -1709,6 +1709,51 @@ await t('graphDesc names every node and every edge, one sentence per column', ()
   assert.equal(occurrences(desc, ' before '), g.edges.length, 'and every edge, once');
 });
 
+console.log('a card is a link, and it opens in a new tab');
+// Cheap assertions on purpose: target/rel are exactly the kind of attribute a
+// later refactor of the card markup drops without anything else going wrong, so
+// the page is checked as a whole rather than one hand-picked card.
+const anchorTags = html => html.match(/<a\b[^>]*>/g) || [];
+await t('every card link carries target="_blank" and rel="noopener"', () => {
+  const html = page(buildGraph([sp(1, [edge(S, 3)]), sp(2, [edge(S, 3)]), sp(3), sp(1225, [], JS)]));
+  const tags = anchorTags(html);
+  assert.equal(tags.length, 4, 'one link per card');
+  for (const tag of tags) {
+    assert.match(tag, /^<a href="https:\/\/github\.com\/[^"]+"/, 'an SVG 2 href, not xlink:href');
+    assert.match(tag, /\btarget="_blank"/, `${tag} opens in a new tab`);
+    assert.match(tag, /\brel="noopener"/, `${tag} does not hand over a window handle`);
+  }
+});
+await t('NO link anywhere on the page opens in this tab, card or not', () => {
+  // Whole-page, so a link added later outside the graph -- in the prose, the
+  // legend, the withheld notice -- has to carry them too or this fails.
+  const html = render({
+    graph: buildGraph([sp(491, [edge(S, 504)]), sp(504)]),
+    author: 'tony8713',
+    org: 'snapshot-labs',
+    generatedAt: '2026-01-01T00:00:00Z',
+    withheld: { count: 2, referenced: 0, blocking: 1 },
+    total: 1
+  });
+  const tags = anchorTags(html);
+  assert.ok(tags.length >= 2, 'there are links to check');
+  assert.equal(
+    tags.filter(tag => /\btarget="_blank"/.test(tag) && /\brel="noopener"/.test(tag)).length,
+    tags.length,
+    `every one of the ${tags.length} links on the page: ${tags.filter(tag => !/target/.test(tag))}`
+  );
+  assert.doesNotMatch(html, /xlink:href/, 'and none of them is an SVG 1.1 xlink link');
+});
+await t('a withheld card is still not a link at all, target or no target', () => {
+  const P = 'snapshot-labs/a-private-repo';
+  const g = buildGraph([sp(491, [edge(P, 86, { crossRepo: true, title: null, author: null, hidden: true })])]);
+  const html = page(g);
+  const tags = anchorTags(html);
+  assert.equal(tags.length, 1, 'the visible card is linked, the withheld one is not');
+  assert.match(tags[0], /stamp\/pull\/491/);
+  assert.doesNotMatch(html, /a-private-repo/, 'nothing new leaked the repo name into a link');
+});
+
 console.log('the fill is the state, said in a colour AND in a word');
 
 // A prerequisite that is not one of the open PRs becomes a dep node, which is
