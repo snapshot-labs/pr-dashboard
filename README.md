@@ -43,15 +43,37 @@ coordinate systems; on one canvas it is just an arrow. Repo grouping survives on
 the build log and in `groupNodes()`; the page itself is the drawing.
 
 A dependency graph is ambiguous without a label, so the direction is stated in the page title, in
-the `<h1>`, in a banner at the top, in the figure caption, on the column headers along the top of
-the diagram (`MERGES FIRST` at the left end, `MERGES LAST` at the right end), in the legend, in the
-footer, in the SVG's `<desc>`, and on every individual edge as that edge's own `<title>`
+the `<h1>`, in the figure caption, on the column headers along the top of the diagram
+(`MERGES FIRST` at the left end, `MERGES LAST` at the right end), in the legend, in the SVG's
+`<desc>`, and on every individual edge as that edge's own `<title>`
 (`stamp#504 → stamp#491 — merge stamp#504 before stamp#491 — …`).
 
 The *absence* of order is labelled just as hard, because it is the half a reader invents when nobody
-says otherwise: each column header carries `N PRs · any order`, and the banner, the caption, the
-legend and the `<desc>` all say that a column has no order inside it. `rank n` is the nth column
-from the left.
+says otherwise: each column header carries `N PRs · any order`, and the caption, the legend and the
+`<desc>` all say that a column has no order inside it. `rank n` is the nth column from the left.
+
+## The graph is the page
+
+Everything that is not the drawing, or the minimum needed to read the drawing, is behind a
+`<summary>`. Visible without clicking anything: the heading, the figure caption — which is where the
+direction now lives, in one sentence — the drawing, and the legend that keys every mark on it. That
+is roughly 180 words; it used to be around 1750, and the prose was winning.
+
+Collapsed, in `<details>` blocks under the graph: how to read it at length, the withheld-PRs notice,
+any edge that could not be drawn, the declaration syntax, and how the page is built. **Folded, never
+deleted** — the text is all still in the file, which is the point: a later agent reading this page
+needs the explanation, a person looking at it wants the picture.
+
+Two of those blocks report something *missing* rather than explaining something, so their **count
+goes in the summary**: `2 PRs withheld from this page`, `1 declared dependency is not drawn as an
+arrow`. A closed block still paints its summary, so the page keeps admitting what it is not showing
+even when nobody opens anything. An admission you have to click for is not an admission.
+
+`<details>` is native HTML. Collapsing the prose cost the page no `<script>`, no library and no
+runtime of any kind — the browser opens and shuts these itself, which is the only reason the page
+can afford to keep all of this text at all. Nothing is hidden with `display:none`, so stripping the
+stylesheet does not spill the prose back over the drawing; and the graph precedes every collapsed
+block in source order, so even a renderer that showed every block open would show the picture first.
 
 ## What a card shows
 

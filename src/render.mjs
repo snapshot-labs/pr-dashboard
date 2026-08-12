@@ -11,6 +11,33 @@
 // that spells the whole structure out in words, and a <title> on every single
 // node and edge -- so the structure is still reachable without seeing the
 // picture. See src/graph.mjs graphDesc().
+//
+// WHAT IS VISIBLE, and what is folded. The drawing was still losing the page to
+// the writing around it, so everything that is not the drawing -- or not the
+// minimum needed to READ the drawing -- now sits behind a <summary>.
+//
+// Visible: the heading, the figure caption, the drawing, the legend. The caption
+// is where the direction lives now, in one sentence, because a dependency graph
+// with no direction label is ambiguous and that is the complaint this page has
+// had more than once; it is not something a reader should have to open a block
+// to find. The legend stays whole rather than trimmed to look tidy: every entry
+// in it decodes a mark that is actually on the canvas, and a key you have to
+// unfold is not a key.
+//
+// Folded: how to read it at length, the withheld notice, any edge that could not
+// be drawn, the declaration syntax, and how the page is built. Folded and NOT
+// deleted -- the words are all still in the file. A later agent reading this page
+// needs the explanation; a person looking at it wants the picture.
+//
+// The two folds that report something MISSING put their count in the summary
+// rather than inside the block, because a closed <details> still paints its
+// summary. The page goes on admitting what it is not showing without being
+// opened first.
+//
+// <details> is native HTML. None of this cost the page a script tag, a library or
+// any runtime, and nothing is hidden with display:none -- so stripping the
+// stylesheet does not spill the prose back over the drawing, and the drawing
+// precedes every folded block in source order either way.
 
 import { esc, graphCss, graphSvg, layoutGraph, nodeState } from './graph.mjs';
 import { STATE_GLYPH, STATE_WORD } from './state.mjs';
@@ -47,8 +74,16 @@ export function render({ graph, author, org, generatedAt, withheld, total }) {
   // A declared dependency that closes a cycle cannot be drawn as an arrow. It is
   // still said out loud, here and in the SVG's <desc>: dropping it silently would
   // be the page lying about what somebody wrote in a PR body.
+  //
+  // Folded, but the COUNT is in the summary. What this block reports is an edge
+  // the picture above cannot show, so it has to survive being shut -- a reader
+  // who never opens it must still learn that the drawing is short of an edge.
   const cutNote = cut.length
-    ? `<p class="notice cut"><strong>${cut.length} declared dependenc${
+    ? `<details class="fold crit">
+<summary>${cut.length} declared dependenc${
+        cut.length === 1 ? 'y is' : 'ies are'
+      } not drawn as ${cut.length === 1 ? 'an arrow' : 'arrows'}</summary>
+<p><strong>${cut.length} declared dependenc${
         cut.length === 1 ? 'y closes' : 'ies close'
       } a cycle</strong> and cannot be drawn as ${
         cut.length === 1 ? 'an arrow' : 'arrows'
@@ -59,17 +94,25 @@ export function render({ graph, author, org, generatedAt, withheld, total }) {
             `<code>${esc(e.from.hidden ? `#${e.from.number}` : e.from.key)}</code> before
              <code>${esc(e.to.hidden ? `#${e.to.number}` : e.to.key)}</code>`
         )
-        .join('; ')}. Nothing declared is dropped.</p>`
+        .join('; ')}. Nothing declared is dropped.</p>
+</details>`
     : '';
 
   // The notice counts only PRs this page would otherwise have drawn, so it
   // measures what privacy is hiding and nothing else. It also says whether any
   // of them blocks something visible, because a withheld PR that blocks nothing
   // costs the graph a card with no edges, not a broken chain.
+  //
+  // Folded like the rest of the prose, and like the cut-edge note the COUNT goes
+  // in the summary rather than inside the block. This notice exists so the page
+  // admits it is not showing everything; an admission that only appears once you
+  // open something is not one, so the number stays legible while shut.
   const n = withheld.count;
   const many = n > 1;
   const withheldNote = n
-    ? `<p class="notice withheld"><strong>${n} PR${many ? 's' : ''} withheld.</strong>
+    ? `<details class="fold warn">
+<summary>${n} PR${many ? 's' : ''} withheld from this page</summary>
+<p><strong>${n} PR${many ? 's' : ''} withheld.</strong>
        ${many ? `They are ${esc(author)}'s own and live in private repos` : `It is ${esc(author)}'s own and lives in a private repo`},
        and this page is served publicly, so ${many ? 'they are' : 'it is'} not drawn here.
        ${
@@ -82,7 +125,8 @@ export function render({ graph, author, org, generatedAt, withheld, total }) {
               ${n} card${many ? 's' : ''} that would have had no edges anyway, not a broken chain.`
        }
        Set <code>INCLUDE_PRIVATE=true</code> on a private build to see ${many ? 'them' : 'it'}.
-       This page does not pretend the work does not exist.</p>`
+       This page does not pretend the work does not exist.</p>
+</details>`
     : '';
 
   return `<!doctype html>
@@ -132,32 +176,38 @@ h1{font-size:20px;margin:0 0 4px}
 .sub{color:var(--ink2);font-size:13px;margin:0 0 16px}
 a{color:inherit}
 
-/* The direction banner. A dependency graph is ambiguous without a label, so the
-   direction -- left to right -- is stated once, loudly, at the top, and again in
-   the figure caption, again on the column headers of the drawing, and again in
-   the legend. */
-.direction{border:1px solid var(--ring);border-left:3px solid var(--good);border-radius:6px;
-  padding:12px 14px;background:var(--raised);margin:0 0 20px;font-size:13px;color:var(--ink2)}
-.direction strong{color:var(--ink)}
-.direction>strong{font-size:14px}
-.direction ul{margin:8px 0 0;padding-left:18px}
-.direction li{margin:4px 0}
 ${graphCss(graph.layout)}
-.notice{border:1px solid var(--ring);border-radius:6px;padding:10px 12px;font-size:13px;
-  color:var(--ink2);background:var(--raised);margin:0 0 20px}
-.notice strong{color:var(--ink)}
-.notice.withheld{border-left:3px solid var(--warning)}
-.notice.cut{border-left:3px solid var(--critical)}
-details.syntax{border:1px solid var(--ring);border-radius:6px;padding:10px 12px;
-  background:var(--raised);margin-bottom:8px}
-details.syntax summary{cursor:pointer;font-weight:600;font-size:13px}
-details.syntax pre{background:var(--surface);border:1px solid var(--rule);border-radius:4px;
-  padding:10px;overflow-x:auto;font-size:12px;margin:10px 0}
-details.syntax p,details.syntax li{font-size:13px;color:var(--ink2)}
+/* Everything that is not the drawing lives in one of these.
+   details/summary is native HTML: it collapses with no scripting, no library and
+   no runtime of any kind, which is the only reason the page can afford to keep
+   all of this prose at all. A closed block still renders its own summary, so the
+   count of withheld PRs and the count of undrawable edges stay on the page even
+   while their explanations are shut -- the page never stops admitting what it is
+   not showing.
+   With the stylesheet stripped these lose their frames and their summaries stop
+   looking clickable, but the disclosure itself is the browser's, not this file's:
+   a summary still opens its block, and nothing here is unreachable. */
+details.fold{border:1px solid var(--ring);border-radius:6px;background:var(--raised);
+  margin:0 0 8px}
+details.fold>summary{cursor:pointer;padding:9px 12px;font-size:13px;font-weight:600;
+  color:var(--ink)}
+details.fold[open]>summary{border-bottom:1px solid var(--rule)}
+details.fold>*:not(summary){margin:10px 12px}
+details.fold p,details.fold li{font-size:13px;color:var(--ink2)}
+details.fold strong{color:var(--ink)}
+details.fold ul{padding-left:18px}
+details.fold li{margin:4px 0}
+details.fold pre{background:var(--surface);border:1px solid var(--rule);border-radius:4px;
+  padding:10px;overflow-x:auto;font-size:12px}
+/* The two folds that report something missing rather than explaining something:
+   accented, so a shut block still reads as a caveat and not as more help. */
+details.fold.warn{border-left:3px solid var(--warning)}
+details.fold.crit{border-left:3px solid var(--critical)}
+/* The graph is the centre piece. The folded stack sits under it, quiet, and is
+   capped at reading width even though the canvas above it is not. */
+.folds{margin-top:26px;max-width:940px}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
   background:var(--surface);border:1px solid var(--rule);border-radius:3px;padding:0 4px}
-footer{margin-top:40px;padding-top:12px;border-top:1px solid var(--rule);font-size:12px;
-  color:var(--muted)}
 </style>
 </head><body><main>
 
@@ -165,8 +215,41 @@ footer{margin-top:40px;padding-top:12px;border-top:1px solid var(--rule);font-si
 <p class="sub">${esc(author)} · ${esc(org)} · ${total} open PR${total === 1 ? '' : 's'} ·
   built ${esc(generatedAt.replace('T', ' ').slice(0, 16))} UTC</p>
 
-<div class="direction">
-<strong>Read the graph left to right. A PR sits to the right of the things it needs.</strong>
+<figure class="graph">
+<figcaption><strong>Merge order reads left to right.</strong> A PR sits to the right of everything it
+needs, so the leftmost column merges first. Two PRs in the same column have
+no order between them. ${graph.nodes.length} PR${graph.nodes.length === 1 ? '' : 's'},
+${drawn.length} dependency edge${drawn.length === 1 ? '' : 's'},
+${graph.layout.maxRank + 1} rank${graph.layout.maxRank === 0 ? '' : 's'} —
+<strong>one column per rank, earliest on the left</strong>.</figcaption>
+<div class="gwrap">
+${svg}
+</div>
+<p class="legend fills">
+<span><span class="k">card fill</span> the state of the PR</span>
+${fillLegend}
+</p>
+<p class="legend">
+<span><span class="k">left to right</span> merge order</span>
+<span><span class="k">arrow</span> merge the tail before the head</span>
+<span><span class="k">same column</span> one rank — no order between them</span>
+<span><span class="k">dashed line</span> crosses repos</span>
+<span><span class="k">dashed card</span> not one of ${esc(author)}'s open PRs</span>
+<span><span class="k">◇ @handle</span> whose PR it is, when it is not ${esc(author)}'s to merge</span>
+<span><span class="k crit">⊘</span> the PR's own title says do not merge</span>
+<span><span class="k gate">GATED</span> release-gated: a published release, not just a merge</span>
+<span><span class="k met">✓ MET</span> that prerequisite has already landed</span>
+</p>
+</figure>
+
+<div class="folds">
+
+<details class="fold">
+<summary>How to read this graph</summary>
+<p><strong>Read the graph left to right. A PR sits to the right of the things it needs.</strong>
+One card per PR; an arrow runs from a prerequisite rightward to the PR that waits on it. A deep
+graph is a wide one: it scrolls sideways rather than shrinking. Hovering a card or an arrow gives
+the full title and the edges it sits on.</p>
 <ul>
 <li>Every arrow runs <strong>from a prerequisite rightward to the PR that waits on it</strong>, so
     the leftmost column merges <strong>first</strong> and the rightmost column merges
@@ -195,40 +278,12 @@ footer{margin-top:40px;padding-top:12px;border-top:1px solid var(--rule);font-si
     <strong>merged</strong> card is only ever a prerequisite that has already landed — this page
     lists open PRs, and a merged one is drawn only when something open still points at it.</li>
 </ul>
-</div>
-
-<figure class="graph">
-<figcaption><strong>One card per PR; an arrow runs from a prerequisite rightward to the PR that
-waits on it.</strong> ${graph.nodes.length} PR${graph.nodes.length === 1 ? '' : 's'},
-${drawn.length} dependency edge${drawn.length === 1 ? '' : 's'},
-${graph.layout.maxRank + 1} rank${graph.layout.maxRank === 0 ? '' : 's'} — laid out by dependency
-depth, <strong>one column per rank, earliest on the left</strong>. Two PRs in the same column have
-no order between them. A deep graph is a wide one: it scrolls sideways rather than shrinking.
-Hovering a card or an arrow gives the full title and the edges it sits on.</figcaption>
-<div class="gwrap">
-${svg}
-</div>
-<p class="legend fills">
-<span><span class="k">card fill</span> the state of the PR</span>
-${fillLegend}
-</p>
-<p class="legend">
-<span><span class="k">left to right</span> merge order</span>
-<span><span class="k">arrow</span> merge the tail before the head</span>
-<span><span class="k">same column</span> one rank — no order between them</span>
-<span><span class="k">dashed line</span> crosses repos</span>
-<span><span class="k">dashed card</span> not one of ${esc(author)}'s open PRs</span>
-<span><span class="k">◇ @handle</span> whose PR it is, when it is not ${esc(author)}'s to merge</span>
-<span><span class="k crit">⊘</span> the PR's own title says do not merge</span>
-<span><span class="k gate">GATED</span> release-gated: a published release, not just a merge</span>
-<span><span class="k met">✓ MET</span> that prerequisite has already landed</span>
-</p>
-</figure>
+</details>
 
 ${cutNote}
 ${withheldNote}
 
-<details class="syntax">
+<details class="fold">
 <summary>Declaring a prerequisite (the syntax this page reads)</summary>
 <p>Explicit stacks — a PR whose base branch is another open PR's head — are computed from the
 GitHub API and are always correct, so they need no declaration. The other two kinds GitHub
@@ -266,8 +321,21 @@ GitHub <code>[!IMPORTANT]</code> callout — never declares anything. Nothing on
 heuristically: an edge exists because somebody wrote it.</p>
 </details>
 
-<footer>Merge order runs left to right: an arrow's tail merges before its head, and PRs sharing a
+<details class="fold">
+<summary>How this page is built</summary>
+<p>Merge order runs left to right: an arrow's tail merges before its head, and PRs sharing a
 column have no order between them at all. Prerequisites GitHub cannot compute come from PR bodies —
-if an edge is missing here, declare it there. Rebuilt on a schedule by a GitHub Action.</footer>
+if an edge is missing here, declare it there. Rebuilt on a schedule by a GitHub Action.</p>
+<p>The diagram is generated <strong>at build time</strong> as inline SVG and written into this file
+as markup. The page loads <strong>nothing</strong>: no Mermaid, no graph library, no CDN, no font, not
+one <code>&lt;script&gt;</code> tag. The blocks on this page are native
+<code>&lt;details&gt;</code> elements, so collapsing the prose off the page cost it no runtime
+either — the browser opens and shuts them on its own.</p>
+<p>The card geometry, the base ink and the arrowheads are presentation attributes on the SVG rather
+than CSS rules, so the drawing still reads with the stylesheet stripped. What the stylesheet adds is
+the theming: dark mode, the state fills, and the dash patterns.</p>
+</details>
+
+</div>
 </main></body></html>`;
 }

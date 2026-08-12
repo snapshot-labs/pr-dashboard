@@ -882,6 +882,162 @@ await t('NO runtime dependency: no script tag, nothing loaded from anywhere', ()
     urls.join(' ')
   );
 });
+// The page is the graph. Everything that is not the drawing, or the minimum
+// needed to read the drawing, is behind a <summary> -- present for whoever needs
+// it, not competing with the picture for the reader's attention.
+//
+// "Visible" here means what a browser paints before anything is clicked: the
+// content outside every <details>, PLUS each block's own <summary>, because a
+// closed block still renders its summary. Nothing nests, so the non-greedy match
+// is exact -- and one of these tests pins that no-nesting assumption, since a
+// nested block would silently make every other test in this section lie.
+const fold = html =>
+  html.replace(/<details\b[^>]*>([\s\S]*?)<\/details>/g, (m, inner) => {
+    const s = inner.match(/<summary>[\s\S]*?<\/summary>/);
+    return s ? s[0] : '';
+  });
+const summariesOf = html =>
+  [...html.matchAll(/<summary>([\s\S]*?)<\/summary>/g)].map(m => m[1].replace(/<[^>]*>/g, '').trim());
+// The visible words, not counting the drawing's own text (column headers and
+// card titles are the picture, not prose about it).
+const visibleWords = html =>
+  fold(html)
+    .replace(/<svg[\s\S]*?<\/svg>/g, ' ')
+    .replace(/<head[\s\S]*?<\/head>/g, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean).length;
+
+console.log('the graph is the page; everything else is behind a summary');
+await t('the drawing itself is never inside a collapsed block', () => {
+  const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
+  const visible = fold(html);
+  assert.match(visible, /<svg class="depgraph"/, 'the graph is above the fold');
+  assert.match(visible, /<h1>Open PRs — merge left to right<\/h1>/, 'and so is the heading');
+  assert.match(visible, /<figcaption>/, 'and its caption');
+  assert.match(visible, /class="legend"/, 'and the key to its marks');
+});
+await t('the DIRECTION label is visible without opening anything', () => {
+  // An unlabelled dependency graph is ambiguous, and that has been the recurring
+  // complaint on this page. Collapsing the long explainer must not take the one
+  // sentence that says which way to read the picture with it.
+  const visible = fold(page(buildGraph([sp(491, [edge(S, 504)]), sp(504)])));
+  assert.match(visible, /<strong>Merge order reads left to right\.<\/strong>/, 'in the caption');
+  assert.match(visible, /A PR sits to the right of everything it\s*needs/);
+  assert.match(visible, /<span class="k">left to right<\/span> merge order/, 'and in the legend');
+  assert.match(visible, /MERGES FIRST/, 'and on the column headers of the drawing');
+  assert.match(visible, /MERGES LAST/);
+});
+await t('the no-order-within-a-column fact is visible too, not folded away', () => {
+  const visible = fold(page(buildGraph([sp(491, [edge(S, 504)]), sp(504), sp(457)])));
+  assert.match(visible, /Two PRs in the same column have\s*no order between them/, 'caption');
+  assert.match(visible, /<span class="k">same column<\/span> one rank — no order between them/);
+  assert.match(visible, /2 PRs · any order/, 'and on the column header itself');
+});
+await t('what a card FILL means is visible, since colour is a legend or it is nothing', () => {
+  const visible = fold(page(buildGraph([sp(491, [edge(S, 504)]), sp(504)])));
+  assert.match(visible, /<span class="k">card fill<\/span> the state of the PR/);
+  for (const s of ['open', 'draft', 'merged'])
+    assert.match(visible, new RegExp(`<span class="sw st-${s}">`), `${s} is keyed above the fold`);
+});
+await t('what an EDGE means is visible: the arrow, the dash, and both edge labels', () => {
+  const visible = fold(page(buildGraph([sp(491, [edge(S, 504)]), sp(504)])));
+  assert.match(visible, /<span class="k">arrow<\/span> merge the tail before the head/);
+  assert.match(visible, /<span class="k">dashed line<\/span> crosses repos/);
+  assert.match(visible, /GATED<\/span> release-gated/);
+  assert.match(visible, /✓ MET<\/span> that prerequisite has already landed/);
+});
+await t('the explainer, the syntax help and the methodology are all COLLAPSED', () => {
+  const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
+  const visible = fold(html);
+  // still on the page in full -- collapsed, never deleted
+  assert.match(html, /Read the graph left to right\. A PR sits to the right of the things it needs\./);
+  assert.match(html, /Order is the horizontal axis only\./);
+  assert.match(html, /Depends on release of snapshot-labs\/snapshot\.js#1225/);
+  assert.match(html, /Merge order runs left to right/);
+  // and none of it competes with the drawing
+  assert.doesNotMatch(visible, /Order is the horizontal axis only\./, 'the explainer is folded');
+  assert.doesNotMatch(visible, /Depends on release of/, 'the declaration syntax is folded');
+  assert.doesNotMatch(visible, /Merge order runs left to right/, 'the methodology is folded');
+  assert.doesNotMatch(visible, /Whole chains are drawn/, 'and the component rule with it');
+  assert.deepEqual(summariesOf(html), [
+    'How to read this graph',
+    'Declaring a prerequisite (the syntax this page reads)',
+    'How this page is built'
+  ]);
+});
+await t('every collapsed block carries a summary, and no block nests inside another', () => {
+  const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
+  assert.equal(
+    occurrences(html, '<details'),
+    summariesOf(html).length,
+    'a block with no summary would be a block with no handle to open it'
+  );
+  assert.equal(occurrences(html, '<details'), occurrences(html, '</details>'));
+  // Nesting would break the strip above, and with it every claim in this section.
+  const flat = html.replace(/<details\b[^>]*>[\s\S]*?<\/details>/g, '');
+  assert.doesNotMatch(flat, /<details|<\/details>|<summary>/, 'no block survives one strip');
+});
+await t('the withheld notice is FOLDED, not deleted, and its count survives being shut', () => {
+  // It exists so the page admits it is not showing everything. An admission that
+  // only appears once you open something is not an admission, so the number goes
+  // in the summary and the accounting goes inside.
+  const g = buildGraph([sp(491)]);
+  const html = render({
+    graph: g,
+    author: 'tony8713',
+    org: 'snapshot-labs',
+    generatedAt: '2026-01-01T00:00:00Z',
+    withheld: { count: 2, referenced: 0, blocking: 0 },
+    total: 1
+  });
+  assert.match(html, /<summary>2 PRs withheld from this page<\/summary>/);
+  assert.match(fold(html), /2 PRs withheld from this page/, 'the count is legible while shut');
+  assert.match(html, /<strong>2 PRs withheld\.<\/strong>/, 'the notice itself is still there');
+  assert.match(html, /INCLUDE_PRIVATE=true/);
+  assert.match(html, /does not pretend the work does not exist/);
+  assert.doesNotMatch(fold(html), /INCLUDE_PRIVATE=true/, 'but the accounting is folded');
+});
+await t('an edge that cannot be drawn also keeps its count in the summary', () => {
+  const html = page(buildGraph([sp(1, [edge(S, 2)]), sp(2, [edge(S, 3)]), sp(3, [edge(S, 2)])]));
+  assert.match(html, /<summary>1 declared dependency is not drawn as an arrow<\/summary>/);
+  assert.match(fold(html), /1 declared dependency is not drawn as an arrow/);
+  assert.match(html, /<strong>1 declared dependency closes a cycle<\/strong>/);
+  assert.doesNotMatch(fold(html), /Nothing declared is dropped/, 'the detail is folded');
+});
+await t('collapsing cost the page NO runtime: it is native markup, not a widget', () => {
+  const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
+  assert.doesNotMatch(html, /<script/i, 'no script tag was added to open a block');
+  assert.doesNotMatch(html, /\son[a-z]+\s*=/i, 'and no inline handler either');
+  assert.doesNotMatch(html, /aria-expanded|role="button"|tabindex/, 'no hand-rolled disclosure');
+  assert.match(html, /<details class="fold"/, 'the browser does it');
+});
+await t('the page still reads with the stylesheet stripped', () => {
+  // <details> is collapsed by the BROWSER, not by this stylesheet, so stripping
+  // the CSS does not spill the prose back over the drawing -- and if a reader's
+  // browser did render every block open, that is acceptable: the content is
+  // ordered so the graph still comes first.
+  const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
+  const nocss = html.replace(/<style[\s\S]*?<\/style>/g, '');
+  assert.doesNotMatch(nocss, /display:none|visibility:hidden/, 'nothing was hidden with CSS');
+  assert.match(nocss, /<summary>How to read this graph<\/summary>/, 'the handles survive');
+  assert.match(nocss, /<rect class="box" x="\d+"/, 'and the drawing keeps its geometry');
+  assert.match(nocss, /stroke="currentColor"/, 'which is presentational attributes, not CSS');
+  assert.ok(
+    html.indexOf('<svg class="depgraph"') < html.indexOf('<details'),
+    'the graph precedes every collapsed block in source order, so it is first either way'
+  );
+});
+await t('the prose competing with the drawing is a fraction of what it was', () => {
+  // The measured form of the complaint. The page carried ~1750 visible words
+  // above the drawing and around it; what is left is the heading, one caption,
+  // the key to the marks, and four summaries.
+  const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
+  const words = visibleWords(html);
+  assert.ok(words < 200, `${words} visible words`);
+  assert.ok(words > 60, `${words} visible words -- the legend must not have been gutted either`);
+});
+
 console.log('with the list gone, the SVG is the text alternative');
 await t('role, title and desc survive, and the desc carries the WHOLE structure', () => {
   const g = buildGraph([
