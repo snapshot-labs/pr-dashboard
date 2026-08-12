@@ -137,6 +137,14 @@ footer{margin-top:40px;padding-top:12px;border-top:1px solid var(--rule);font-si
     stand under it and repeats that there is no order between them.</li>
 <li><strong>Every PR is drawn exactly once</strong>, as one card carrying its repo, its number and
     its title. A PR that two others need is one card with two arrows leaving it, not two cards.</li>
+<li><strong>Whole chains are drawn, not just ${esc(author)}'s share of them.</strong> If one PR in a
+    chain is ${esc(author)}'s, every PR joined to it — following the arrows in <em>either</em>
+    direction — is drawn too, whoever wrote it. A chain with none of ${esc(author)}'s PRs in it is
+    not drawn at all, and nothing arrives here except through a declared dependency.</li>
+<li><strong>Every card that is not ${esc(author)}'s says so</strong>, wherever it sits: dashed, and
+    marked <code>◇ @handle</code>, including one that starts a chain and has prerequisites of its
+    own. An unmarked card is ${esc(author)}'s — that marker is the only thing that says whose a PR
+    is, so read it.</li>
 </ul>
 </div>
 
@@ -184,11 +192,19 @@ Depends on #504 — reason, shown when you hover the arrow</pre>
     is published <em>after</em> the PR merged. That edge is marked <code>GATED</code>.</li>
 <li>A trailing <code>—</code>, <code>-</code> or <code>:</code> adds a reason.</li>
 </ul>
-<p><strong>Whose PRs appear here.</strong> Every card without a <code>◇</code> marker is a PR by
-<code>${esc(author)}</code>. Somebody else's PR is drawn only when one of these depends on it, as the
-<em>target of that edge</em>, on a dashed card marked <code>◇ @handle</code>. Dropping it instead
-would hide why the PR pointing at it cannot merge. A PR by another author that nothing here depends
-on is not drawn at all.</p>
+<p><strong>Whose PRs appear here.</strong> Take the dependency graph and split it into
+<em>connected chains</em> — everything joined by dependency edges, following them in either
+direction. A chain is drawn <strong>in full</strong> if <strong>at least one</strong> PR in it is
+<code>${esc(author)}</code>'s; a chain with none of ${esc(author)}'s in it is not drawn at all. So
+somebody else's PR is a full card here, with its own prerequisites, and can be the leftmost thing in
+the picture — what it never is, is unmarked: every card that is not <code>${esc(author)}</code>'s is
+dashed and carries <code>◇ @handle</code>, and it is not counted in the open-PR total at the top.</p>
+<p>This replaced a narrower rule — <em>somebody else's PR is drawn only as the target of one of
+${esc(author)}'s edges, never a card of its own</em> — which cut a chain off at the first PR that was
+not ${esc(author)}'s and so hid what the rest of it was waiting for. The bound did not change:
+nothing is on this page that a declared dependency does not join, transitively, to a PR of
+${esc(author)}'s. Being recent, or in the same repo, or interesting, brings a PR no closer to being
+drawn.</p>
 <p>Parsing rules, so prose never becomes an edge: the line must <strong>start</strong> with
 <code>Depends on</code> (a leading <code>-</code> bullet is fine); lines inside fenced code blocks are
 ignored; and <strong>blockquoted lines are ignored</strong>, so quoting another PR body — or a

@@ -172,19 +172,39 @@ change, and Pages can then be turned off or left as a mirror.
 
 ## Whose PRs are on it
 
-**Every card without a `◇` marker is a PR by `PR_AUTHOR`. Somebody else's PR is never one of them.**
+**Whole connected components, drawn when at least one PR in them is `PR_AUTHOR`'s.**
 
-Somebody else's PR earns a place in exactly one way: one of yours depends on it. Then it is drawn as
-the **target of that edge**, on a dashed card marked `◇ @handle`, and never counted in the open
-count. A PR by another author that nothing of yours points at is not drawn at all.
+Split the dependency graph into connected components, treating every edge as **undirected** — a
+component is everything transitively joined by dependency edges, followed in either direction. A
+component is drawn **in full**, every card in it and whoever wrote them, if **at least one** PR in it
+is `PR_AUTHOR`'s. A component with none of `PR_AUTHOR`'s in it is not drawn at all.
 
-The reason it is not simply filtered out: `sx-monorepo#2222` is branched off `#2219`, which is
-wa0x6e's. Dropping `#2219` would hide why `#2222` cannot merge, so it stays — one arrow into
-`#2222`, marked.
+So somebody else's PR is a full card: it can be a root, it can have prerequisites of its own drawn
+behind it, and it is not confined to being the target of one of your arrows. What it can never be is
+unmarked — every card that is not `PR_AUTHOR`'s is dashed, carries `◇ @handle`, and is left out of
+the open-PR count. That marker carries more weight than it used to: the page no longer implies whose
+a card is by the mere fact of having drawn it.
 
-`buildGraph()` builds nodes from your PRs only; anybody else's becomes a node solely as the target
-of one of your edges (`kind: 'dep'`), and every non-`PR_AUTHOR` PR is dropped from the seed set
-explicitly and reported on `graph.pruned`, so the rule does not rest on the search string alone.
+This **reverses** the earlier rule, which was *"every card is a PR of yours; somebody else's is drawn
+only as the target of one of your edges, never a card of its own and never a root"*. It kept
+`sx-monorepo#2219` (wa0x6e's, the branch `#2222` of yours sits on) as a bare leaf and stopped there,
+so if `#2219` had prerequisites of its own the page hid what `#2222` was really waiting for.
+
+**It stays bounded.** Only PRs joined to one of yours by a *declared* dependency edge are drawn.
+Nobody's PR arrives here for being recent, interesting, or in the same repo. Concretely:
+
+- `buildGraph()` builds a node for every PR handed to it, whoever wrote it, and marks it `kind:
+  'own'` (yours, carrying CI) or `kind: 'dep'` (anybody else's, dashed and marked `◇`).
+- `pruneComponents()` then drops every component holding no PR of yours, in one piece, and reports
+  each dropped PR on `graph.pruned` — so what the page leaves out is stated, not quietly filtered.
+  `componentsOf()` is the undirected walk it uses.
+- The build sweeps the open PRs of the repos it already has a reason to open — the repos your open
+  PRs live in, plus any repo a drawn dependency points into — and treats what it finds as
+  *candidates*. A candidate on no dependency edge at all is not even offered to `buildGraph()`, so
+  `graph.pruned` names chains that were declined, not every other open PR in the org.
+
+Today the rule reaches exactly one PR the old one already drew — `sx-monorepo#2219` — and keeps two
+all-`bonustrack` stacks out, because no PR of `PR_AUTHOR`'s is anywhere in them.
 
 A prerequisite in **another repo** that is one of your own PRs is the *same node* as its own entry:
 one box, drawn once, with an arrow that crosses the repo boundary. That is what changed — it used to
@@ -245,17 +265,26 @@ publicly. By default those PRs are **withheld**, and the page says so, with a co
 quietly drop them. Set `INCLUDE_PRIVATE=true` only for a build that is not public.
 
 The count measures what privacy is hiding and nothing else, so it counts only PRs the page **would
-otherwise have drawn**: yours, plus anybody's that something visible depends on. A private PR that
-the only-yours-are-yours rule would prune anyway is not counted as withheld — calling it withheld
-would overstate the loss. The notice also says how many of them block a PR shown on the page,
-because a withheld PR that blocks nothing costs the graph a card with no edges rather than a broken
-chain. Today that is **2 withheld, 0 blocking**.
+otherwise have drawn**: yours, plus anybody's that something drawn depends on. A private PR that the
+component rule would prune anyway — no PR of yours anywhere in its component — is not counted as
+withheld, because calling it withheld would overstate the loss. The notice also says how many of
+them block a PR shown on the page, because a withheld PR that blocks nothing costs the graph a card
+with no edges rather than a broken chain. Today that is **2 withheld, 0 blocking**.
 
-The page never names the private repos. The dependency renderer applies the same rule: a dependency
-whose target lives in a private repo keeps its number but drops its title and author on a public
-build, and — since the graph is page-wide and every other card is labelled `repo#number` — it is
-drawn as a bare `#number`, in the `<desc>` too. It is also the one card that is **not a link**: the
-`html_url` carries the repo name that the rest of the card is careful not to print.
+The page never names the private repos, and the component rule did not loosen that. Anything from a
+private repo that is drawn at all — a dependency target, or somebody else's PR that a component
+pulled in as a card of its own — keeps its **number** and loses everything else: no title, no
+author, and, since every other card is labelled `repo#number`, no repo name either. It is drawn as a
+bare `#number`, in the `<desc>` too, and it is the one card that is **not a link**: the `html_url`
+carries the repo name that the rest of the card is careful not to print.
+
+A hidden card also loses its **body**, which means it declares no dependencies of its own: it
+contributes no branch names and no edge reasons, and is drawn with only the one edge that pulled it
+in. A card the page cannot even name has no business printing prose out of a private repo. For the
+same reason a private repo is never *swept* for candidates on a public build — only the repos it can
+name are.
+
+Your own private PRs are the one thing not drawn at all: they are withheld and counted, per above.
 
 ## Tokens
 

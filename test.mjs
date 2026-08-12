@@ -5,15 +5,19 @@ import { classify } from './src/ci.mjs';
 import {
   accountWithheld,
   buildGraph,
+  componentsOf,
   decorateEdge,
   duplicateNodes,
   groupNodes,
   isMineFor,
+  redactPrivate,
+  resolveDeps,
   resolveStatus
 } from './build.mjs';
 import {
   cardOf,
   columnLabel,
+  descRef,
   graphDesc,
   layoutGraph,
   NODE_H,
@@ -116,52 +120,140 @@ const neededBy = n => n.neededBy.map(e => e.to.key);
 const copies = (graph, key) => graph.nodes.filter(n => n.key === key).length;
 const occurrences = (haystack, needle) => haystack.split(needle).length - 1;
 
-console.log('only my PRs are listed as mine');
+// THE RULE, and it reverses the one this file used to pin down.
+//
+// It used to be: every node is a PR of mine, and somebody else's is drawn only as
+// the TARGET of one of my edges -- never a node in its own right, never a root,
+// never with prerequisites of its own. That cut a chain off at the first PR that
+// was not mine and hid what the rest of it was waiting for.
+//
+// It is now: split the graph into connected components, treating every edge as
+// UNDIRECTED, and draw a component in full -- every node in it, whoever wrote it
+// -- if at least one PR in it is mine. A component with none of mine in it is
+// dropped whole and reported on `graph.pruned`.
+//
+// What did NOT change, and matters more now than it did: every node that is not
+// mine is marked as not mine. The page no longer implies whose a node is by the
+// fact of having drawn it.
+console.log('a component is drawn when at least ONE PR in it is mine');
 const mine = isMineFor('tony8713');
-const pr = (number, author, deps = []) => ({
-  repo: 'snapshot-labs/sx-monorepo',
+const SX = 'snapshot-labs/sx-monorepo';
+const pr = (number, author, deps = [], repo = SX) => ({
+  repo,
   number,
+  title: `pr ${number}`,
+  url: `https://github.com/${repo}/pull/${number}`,
   author,
-  deps: deps.map(d => ({
-    repo: 'snapshot-labs/sx-monorepo',
-    number: d,
-    crossRepo: false,
-    satisfied: false
-  }))
+  draft: false,
+  status: 'open',
+  ci: { state: 'green', ownFailures: [], baseFailures: [], pending: [], total: 0, passed: 0 },
+  deps: deps.map(d =>
+    typeof d === 'number'
+      ? { repo, number: d, crossRepo: false, satisfied: false, status: 'open' }
+      : { repo, crossRepo: false, satisfied: false, status: 'open', ...d }
+  )
 });
 
-await t('a PR by another author is never listed as one of mine', () => {
+await t('one PR of mine in a chain draws the WHOLE chain, whoever wrote the rest', () => {
   // The shape of today's data: #2222 is mine and sits on wa0x6e's #2219.
   const g = buildGraph([pr(2222, 'tony8713', [2219]), pr(2219, 'wa0x6e')], mine);
+  assert.deepEqual(g.nodes.map(n => n.number).sort(), [2219, 2222]);
+  assert.deepEqual(g.pruned, [], 'nothing in this component is dropped');
   const [group] = groupNodes(g);
   assert.deepEqual(group.mine.map(n => n.number), [2222]);
-  assert.deepEqual(group.referenced.map(n => n.number), [2219]);
-  assert.deepEqual(g.pruned, ['snapshot-labs/sx-monorepo#2219']);
+  assert.deepEqual(group.referenced.map(n => n.number), [2219], 'accounted apart from mine');
+  assert.equal(group.count, 1, 'and not counted among my open PRs');
 });
-await t('...it is the TARGET of my edge, marked, and waits on nothing itself', () => {
-  const p2222 = pr(2222, 'tony8713', [2219]);
-  Object.assign(p2222.deps[0], { kind: 'stack', author: 'wa0x6e', foreign: true });
-  const g = buildGraph([p2222, pr(2219, 'wa0x6e')], mine);
-  const n = at(g, 'snapshot-labs/sx-monorepo#2219');
+await t('...and every node in it that is not mine is MARKED as not mine', () => {
+  const g = buildGraph([pr(2222, 'tony8713', [2219]), pr(2219, 'wa0x6e')], mine);
+  const n = at(g, `${SX}#2219`);
   assert.equal(n.kind, 'dep');
-  assert.equal(n.foreign, true);
-  assert.deepEqual(neededBy(n), ['snapshot-labs/sx-monorepo#2222']);
-  assert.deepEqual(needs(n), [], 'a referenced PR heads no chain of its own');
-  assert.equal(groupNodes(g)[0].count, 1, 'only #2222 counts as one of mine');
+  assert.equal(n.foreign, true, 'the marking is what stops it reading as my work');
+  assert.equal(at(g, `${SX}#2222`).foreign, false);
 });
-await t('the dependency on it survives -- it is not filtered away', () => {
-  const p = pr(2222, 'tony8713', [2219]);
-  const g = buildGraph([p, pr(2219, 'wa0x6e')], mine);
-  assert.equal(p.deps.length, 1);
-  assert.deepEqual(needs(at(g, 'snapshot-labs/sx-monorepo#2222')), [
-    'snapshot-labs/sx-monorepo#2219'
-  ]);
+await t("somebody else's PR can be a ROOT, with prerequisites of its own drawn", () => {
+  // wa0x6e's #2219 is branched off wa0x6e's #2210, and mine sits on top. The old
+  // rule stopped at #2219 and never showed why IT could not merge.
+  const g = buildGraph(
+    [pr(2222, 'tony8713', [2219]), pr(2219, 'wa0x6e', [2210]), pr(2210, 'wa0x6e')],
+    mine
+  );
+  assert.deepEqual(g.nodes.map(n => n.number).sort(), [2210, 2219, 2222]);
+  assert.deepEqual(needs(at(g, `${SX}#2219`)), [`${SX}#2210`], 'it heads a chain of its own now');
+  assert.equal(at(g, `${SX}#2210`).rank, 0, 'and the root of that chain is not mine either');
+  assert.deepEqual([at(g, `${SX}#2219`).rank, at(g, `${SX}#2222`).rank], [1, 2]);
+  assert.deepEqual(g.nodes.filter(n => n.foreign).map(n => n.number).sort(), [2210, 2219]);
 });
-await t('a foreign PR nothing of mine depends on is absent from the graph entirely', () => {
+await t("connectivity is UNDIRECTED: a PR of somebody else's that waits on MINE is drawn", () => {
+  // Nothing of mine points at #900. It points at me, which joins it to my
+  // component just the same -- a chain is a chain from either end.
+  const g = buildGraph([pr(1, 'tony8713'), pr(900, 'wa0x6e', [1])], mine);
+  assert.deepEqual(g.nodes.map(n => n.number).sort(), [1, 900]);
+  assert.deepEqual(g.pruned, []);
+  assert.deepEqual(neededBy(at(g, `${SX}#1`)), [`${SX}#900`]);
+  assert.equal(at(g, `${SX}#900`).foreign, true);
+});
+await t('...and what THAT PR waits on comes with it, two hops from anything of mine', () => {
+  const g = buildGraph([pr(1, 'tony8713'), pr(900, 'wa0x6e', [1, 901]), pr(901, 'wa0x6e')], mine);
+  assert.deepEqual(g.nodes.map(n => n.number).sort(), [1, 900, 901]);
+  assert.deepEqual(g.pruned, [], '#901 is joined to me only through #900, and that is enough');
+});
+await t('a chain with NONE of mine in it is dropped whole, and the drop is reported', () => {
+  // Today's real second component: bonustrack's #2188 <- #2191 <- #2192, which no
+  // PR of mine touches anywhere. It is not drawn, not even the end of it.
+  const g = buildGraph(
+    [
+      pr(1, 'tony8713'),
+      pr(2192, 'bonustrack', [2191]),
+      pr(2191, 'bonustrack', [2188]),
+      pr(2188, 'bonustrack')
+    ],
+    mine
+  );
+  assert.deepEqual(g.nodes.map(n => n.number), [1], 'only my component survives');
+  assert.deepEqual(g.pruned, [`${SX}#2188`, `${SX}#2191`, `${SX}#2192`]);
+  assert.equal(g.edges.length, 0, 'and its edges go with it');
+  for (const k of g.pruned) assert.equal(at(g, k), undefined, `${k} is not reachable by key`);
+});
+await t('NEGATIVE: a lone PR by somebody else is not drawn', () => {
+  // The bound: a PR is drawn because a declared dependency joins it to one of
+  // mine, never because it is in the same repo or turned up in the same sweep.
   const g = buildGraph([pr(1, 'tony8713'), pr(999, 'someone-else')], mine);
   assert.deepEqual(g.nodes.map(n => n.number), [1]);
-  assert.equal(at(g, 'snapshot-labs/sx-monorepo#999'), undefined);
-  assert.deepEqual(g.pruned, ['snapshot-labs/sx-monorepo#999']);
+  assert.equal(at(g, `${SX}#999`), undefined);
+  assert.deepEqual(g.pruned, [`${SX}#999`]);
+});
+await t('NEGATIVE: a foreign chain is not rescued by touching a DROPPED foreign chain', () => {
+  const g = buildGraph([pr(1, 'tony8713'), pr(900, 'wa0x6e', [901]), pr(901, 'bonustrack')], mine);
+  assert.deepEqual(g.nodes.map(n => n.number), [1]);
+  assert.deepEqual(g.pruned, [`${SX}#900`, `${SX}#901`]);
+});
+await t('a PR reachable two ways is still exactly ONE node', () => {
+  const g = buildGraph(
+    [pr(1, 'tony8713', [900]), pr(2, 'tony8713', [900]), pr(900, 'wa0x6e')],
+    mine
+  );
+  assert.equal(copies(g, `${SX}#900`), 1);
+  assert.deepEqual(neededBy(at(g, `${SX}#900`)), [`${SX}#1`, `${SX}#2`]);
+  assert.deepEqual(duplicateNodes(g), []);
+});
+await t('componentsOf splits on edges taken in EITHER direction', () => {
+  const g = buildGraph(
+    [pr(1, 'tony8713'), pr(900, 'wa0x6e', [1, 901]), pr(901, 'wa0x6e'), pr(5, 'tony8713')],
+    mine
+  );
+  const comps = componentsOf(g.nodes).map(c => c.map(n => n.number).sort((a, b) => a - b));
+  comps.sort((a, b) => a[0] - b[0]);
+  assert.deepEqual(comps, [[1, 900, 901], [5]]);
+});
+await t('pruneComponents keeps a component held only by a MERGED PR of mine', () => {
+  // A node of mine that is not one of my open PRs -- a merged prerequisite, say --
+  // is still a PR of mine, and still holds its component on the page.
+  const g = buildGraph([pr(900, 'wa0x6e', [{ number: 500, author: 'tony8713' }])], mine);
+  assert.deepEqual(g.nodes.map(n => n.number).sort(), [500, 900]);
+  assert.deepEqual(g.pruned, []);
+  assert.equal(at(g, `${SX}#500`).kind, 'dep', 'not one of my open PRs, so no CI on it');
+  assert.equal(at(g, `${SX}#500`).foreign, false, "but not somebody else's either");
 });
 await t('case-insensitive author match', () => {
   assert.equal(isMineFor('tony8713')('Tony8713'), true);
@@ -791,6 +883,57 @@ await t("somebody else's PR is marked ◇ @handle on a dashed card, with a legen
   );
   assert.doesNotMatch(html, /not yours · @wa0x6e/, 'the long form is gone');
 });
+await t('a foreign ROOT is marked too, and so is every foreign card behind it', () => {
+  // The card the old rule could not draw at all: not mine, at the left end, with
+  // a prerequisite of its own. Both of them have to say whose they are, because
+  // nothing else on the page does now.
+  const g = buildGraph(
+    [pr(2222, 'tony8713', [2219]), pr(2219, 'wa0x6e', [2210]), pr(2210, 'wa0x6e')],
+    mine
+  );
+  const html = page(g);
+  assert.equal(occurrences(html, '<tspan class="g">◇</tspan> @wa0x6e</text>'), 2, 'both marked');
+  assert.equal(occurrences(html, '<g class="node dep">'), 2, 'and both cards dashed');
+  assert.equal(occurrences(html, '@wa0x6e — not yours to merge'), 2, 'in the hover title too');
+  assert.match(html, /1 open PR/, 'one open PR of mine, not three');
+});
+await t('the text alternative says whose each card is, and that whole chains are drawn', () => {
+  // With the per-PR list gone the <desc> is all a reader who is not looking at
+  // the picture gets, so the authorship cannot live only on the card.
+  const g = buildGraph([pr(2222, 'tony8713', [2219]), pr(2219, 'wa0x6e')], mine);
+  const html = page(g);
+  assert.match(
+    html,
+    /A whole dependency chain is drawn whenever at least one pull request in it belongs to the page author/
+  );
+  assert.match(html, /Every one that is not the page author's names its author where it is listed/);
+  assert.match(
+    html,
+    /holds 1 pull request: sx-monorepo#2219 \(by @wa0x6e, not the page author's\)\./
+  );
+  assert.match(html, /holds 1 pull request: sx-monorepo#2222\./, 'and mine is named plainly');
+  assert.equal(descRef(at(g, `${SX}#2222`)), 'sx-monorepo#2222');
+  assert.equal(descRef(at(g, `${SX}#2219`)), "sx-monorepo#2219 (by @wa0x6e, not the page author's)");
+});
+await t('the page states the component rule, and no longer the roots-are-mine one', () => {
+  const html = page(buildGraph([pr(2222, 'tony8713', [2219]), pr(2219, 'wa0x6e')], mine));
+  assert.match(html, /Whole chains are drawn, not just tony8713's share of them\./);
+  assert.match(
+    html,
+    /every PR joined to it — following the arrows in <em>either<\/em>\s*direction — is drawn too, whoever wrote it/
+  );
+  assert.match(html, /A chain with none of tony8713's PRs in it is\s*not drawn at all/);
+  assert.match(html, /Every card that is not tony8713's says so/);
+  assert.match(
+    html,
+    /A chain is drawn <strong>in full<\/strong> if <strong>at least one<\/strong> PR in it is/
+  );
+  // the reversed rule is explained, not silently deleted
+  assert.match(html, /This replaced a narrower rule/);
+  assert.doesNotMatch(html, /Every card without a <code>◇<\/code> marker is a PR by/);
+  assert.doesNotMatch(html, /Somebody else's PR is drawn only when one of these depends on it/);
+  assert.doesNotMatch(html, /nothing here depends\s*on is not drawn at all/);
+});
 await t("a title that says DO NOT MERGE is lifted onto its own line, where truncation cannot reach it", () => {
   // sx#2251. The words are part of the PR's own title, so a long title plus a
   // narrow card could otherwise cut them off and leave the PR reading as ready.
@@ -833,6 +976,43 @@ await t('a private dependency target keeps its number and never its repo name, h
   assert.match(html, /<tspan class="g">◇<\/tspan> private repo<\/text>/);
   assert.match(html, /title withheld \(private repo\)/);
   assert.match(html, /#86 before stamp#491/, 'and the text alternative uses the number only');
+});
+await t('a PR the COMPONENT rule pulls in from a private repo is redacted the same way', () => {
+  // The new rule can put somebody else's PR on the page as a card of its own.
+  // Privacy does not care how it got here: from a private repo it is a number,
+  // with no title, no author, no repo name and no link.
+  const P = 'snapshot-labs/a-private-repo';
+  const secret = pr(86, 'wa0x6e', [], P);
+  secret.title = 'secret work about the acme launch';
+  secret.body = 'Depends on #999 — because of the secret thing';
+  secret.base = 'feat/secret-branch';
+  redactPrivate(secret);
+  const g = buildGraph([pr(491, 'tony8713', [{ repo: P, number: 86, crossRepo: true }]), secret], mine);
+  assert.deepEqual(g.pruned, [], 'it is drawn: it is in a component of mine');
+  const n = at(g, `${P}#86`);
+  assert.deepEqual([n.hidden, n.title, n.author], [true, null, null]);
+
+  const html = page(g);
+  assert.doesNotMatch(html, /a-private-repo/, 'the repo name appears NOWHERE, not even in a link');
+  assert.doesNotMatch(html, /secret work|acme|secret-branch|secret thing/i, 'nor anything else of it');
+  assert.doesNotMatch(html, /@wa0x6e/, 'nor its author');
+  assert.match(html, /<text class="ref" [^>]*>#86<\/text>/, 'the card shows the number only');
+  assert.match(html, /<tspan class="g">◇<\/tspan> private repo<\/text>/);
+  assert.match(html, /#86 \(private repository, details withheld\)/, 'and the desc says why');
+});
+await t('a hidden node declares nothing of its own: no edges, no branch names, no reasons', async () => {
+  // Its body goes with its title. A card the page cannot even name has no
+  // business printing prose or branch names out of a private repo.
+  const rec = redactPrivate({
+    repo: 'snapshot-labs/a-private-repo',
+    number: 86,
+    author: 'wa0x6e',
+    title: 'secret work',
+    base: 'feat/secret-branch',
+    body: 'Depends on #999 — because the secret thing'
+  });
+  assert.deepEqual([rec.title, rec.author, rec.body, rec.hidden], [null, null, '', true]);
+  assert.deepEqual(await resolveDeps(rec, new Map()), [], 'and it contributes no edge of its own');
 });
 await t('the withheld notice keeps its accounting', () => {
   const g = buildGraph([sp(491)]);

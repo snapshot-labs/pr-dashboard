@@ -228,6 +228,12 @@ export function splitHold(title) {
 // The markers a card is allowed to carry. Everything else that used to be a
 // badge is gone; these three stay because each one changes whether or when
 // something can merge, and each is explained in the legend under the drawing.
+//
+// The authorship marker earns its place twice over since the page started drawing
+// whole components. It used to sit on a card that could only ever be the target of
+// one of the author's arrows; now somebody else's PR can be the leftmost card in
+// the picture with prerequisites of its own, and this marker plus the dashed
+// outline are the only things saying whose it is.
 export function nodeMarks(n, hold) {
   const out = [];
   if (hold) out.push({ role: 'critical', glyph: '⊘', text: hold });
@@ -473,6 +479,21 @@ export function columnLabel(r, maxRank, count, unordered = true) {
 // silently dropped just because it cannot be drawn.
 //
 // It uses nodeRef(), so a withheld repo name is withheld here too.
+// How a card is named in the description: its ref, and its author when that
+// author is not the page's. Same rule as the `◇` marker on the card itself, in
+// the one place a reader who cannot see the card will find it.
+export const descRef = n =>
+  nodeRef(n) +
+  (n.hidden
+    ? ' (private repository, details withheld)'
+    : n.kind === 'own'
+      ? ''
+      : !n.author
+        ? ' (author unknown)'
+        : n.foreign
+          ? ` (by @${n.author}, not the page author's)`
+          : '');
+
 export function graphDesc(graph) {
   const drawn = (graph.edges || []).filter(e => !e.cycle);
   const cut = (graph.edges || []).filter(e => e.cycle);
@@ -491,6 +512,16 @@ export function graphDesc(graph) {
     'One column is one rank, and pull requests stacked in the same column are independent of one' +
       ' another: they can merge in any order or at the same time, so their vertical position' +
       ' carries no meaning.',
+    // Whose a card is has to be IN HERE, not only in the marker on the card and
+    // the hover title. Under role="img" this description is the whole of what a
+    // reader who is not looking at the picture gets, and the page draws entire
+    // dependency chains on the strength of one pull request in them belonging to
+    // the page author -- so a card named here without its author would read as
+    // the page author's by default, which is the one thing the marking exists to
+    // stop.
+    'A whole dependency chain is drawn whenever at least one pull request in it belongs to the' +
+      ' page author, so some of the cards below are somebody else\'s. Every one that is not the' +
+      ' page author\'s names its author where it is listed; the rest are the page author\'s own.',
     'The whole structure follows, in words.'
   ];
 
@@ -507,7 +538,7 @@ export function graphDesc(graph) {
       list.length === 1
         ? 'holds 1 pull request'
         : `holds ${list.length} pull requests, in any order among themselves`;
-    parts.push(`${where} ${how}: ${list.map(nodeRef).join(', ')}.`);
+    parts.push(`${where} ${how}: ${list.map(descRef).join(', ')}.`);
   });
 
   parts.push(
