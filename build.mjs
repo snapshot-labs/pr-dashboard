@@ -3,12 +3,17 @@
 // GRAPH -- one node per PR, however many edges that PR happens to be on either
 // end of.
 //
-// Direction, which is unchanged and is the one thing this picture must never
-// leave ambiguous:
+// Direction, the one thing this picture must never leave ambiguous:
 //
-//   a PR sits ABOVE the things it needs. Every arrow runs from a prerequisite
-//   UP to the PR that waits on it, so the bottom rank merges FIRST, the top
-//   rank merges LAST, and reading the drawing bottom-up IS merge order.
+//   the graph reads LEFT TO RIGHT. A PR sits to the RIGHT of the things it
+//   needs. Every arrow runs from a prerequisite RIGHTWARD to the PR that waits
+//   on it, so the leftmost column merges FIRST, the rightmost column merges
+//   LAST, and reading the drawing left to right IS merge order.
+//
+// And the direction that does NOT exist: one rank is one COLUMN, and the PRs
+// stacked inside a column have no edge between them and no order between them.
+// Vertical position is packing. The page says so on every column header, in the
+// banner, in the caption, in the legend, and on every row of the text form.
 //
 // Why a graph and not the nested tree this replaced. A PR can have several
 // INDEPENDENT prerequisites -- stamp#491 needs stamp#504 merged AND
@@ -322,8 +327,8 @@ export const edgeOrder = (a, b) =>
 // box with two arrows leaving it.
 //
 // An edge points from the PREREQUISITE to the PR that waits on it, i.e. in merge
-// order. `n.needs` are the edges coming in from below, `n.neededBy` the edges
-// leaving upward.
+// order. `n.needs` are the edges arriving from the left, `n.neededBy` the edges
+// leaving to the right.
 //
 // Only MY PRs become nodes on their own. Somebody else's PR becomes a node only
 // as the target of one of my edges, carrying `kind: 'dep'` and whatever

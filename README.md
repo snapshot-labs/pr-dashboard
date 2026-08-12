@@ -6,8 +6,18 @@ runs `node build.mjs` on a schedule and publishes `dist/index.html`.
 
 ## Which way the graph points
 
-**A PR sits above the things it needs. Every arrow runs from a prerequisite to the PR that waits on
-it, so the bottom rank merges first and the top rank merges last. Read the graph bottom-up.**
+**The graph reads left to right. A PR sits to the right of the things it needs. Every arrow runs
+from a prerequisite rightward to the PR that waits on it, so the leftmost column merges first and
+the rightmost column merges last.** A PR merges after everything to its left that it is joined to.
+
+**And the direction that does not exist: one rank is one column, and the PRs stacked inside a column
+have no edge and no order between them.** Vertical position is packing. A reader tells order from
+no-order by the axis: different column means one merges before the other, same column means any
+order, or all at once.
+
+That is also why a tall rank is never folded into a second column — two columns read as two ranks,
+which would invent an order that is not there. A rank of twenty is one tall column; a long
+dependency chain is a wide graph that scrolls sideways rather than being scaled down to fit.
 
 ## Why it is a graph and not a tree
 
@@ -33,10 +43,22 @@ coordinate systems; on one canvas it is just an arrow. Repo grouping survives in
 underneath, where every PR appears under its own repo — once.
 
 A dependency graph is ambiguous without a label, so the direction is stated in the page title, in
-the `<h1>`, in a banner at the top, in the figure caption, on the rank labels down the left edge of
-the diagram (`MERGES FIRST` / `MERGES LAST`), on the `then` marker in each gap between ranks, under
-every repo heading, in the legend, in the footer, and on every individual edge in the list
-(`needs first` one way, `needed by` the other).
+the `<h1>`, in a banner at the top, in the figure caption, on the column headers along the top of
+the diagram (`MERGES FIRST` at the left end, `MERGES LAST` at the right end), under every repo
+heading, in the legend, in the footer, and on every individual edge in the list (`needs first` one
+way, `needed by` the other).
+
+The *absence* of order is labelled just as hard, because it is the half a reader invents when nobody
+says otherwise: each column header carries `N PRs · any order`, the banner and the caption and the
+legend all say that a column has no order inside it, and — since the text form is a vertical list
+and a vertical list looks like a sequence — every row of it carries a `rank n of m · any order among
+the k in it` badge, under a notice saying the list is sorted by repo and number and is not a running
+order. `rank n` is the nth column from the left.
+
+The `any order` claim is checked rather than assumed. Two PRs at one rank cannot have a drawn edge
+between them, because a drawn edge always pushes its head into a later rank — but the edge that gets
+*cut* to break a cycle contributes no depth and can leave both ends at one rank. `rankCensus()`
+looks for exactly that and downgrades the affected column to `a cycle is cut here`.
 
 ## How the diagram is drawn
 
@@ -46,36 +68,46 @@ GitHub Pages and stays that way.
 
 The layout is layered by dependency depth, Sugiyama-style: rank 0 is every PR with no prerequisites,
 and a PR's rank is one past its *deepest* prerequisite (longest path, so a PR is never drawn level
-with something it waits on). Ranks are stacked bottom-up. Within a rank, nodes are ordered by the
-barycentre of the prerequisites already placed below them; a rank wider than five nodes wraps into a
-grid, with the nodes that have an arrow leaving them on the row nearest the rank above. Two arrows
-arriving at the same box are fanned apart, because two arrowheads on one pixel read as one arrow —
-and "two edges into one node" is the fact this page exists to show.
+with something it waits on). Rank *r* is drawn as the column at *x = r*, so the horizontal axis is
+merge order. Within a column, nodes are ordered by the barycentre of the prerequisites already
+placed in the columns to their left, and each one slides down only as far as it must to stop two
+boxes overlapping — so a column is as tall as it needs to be and is never split. Two arrows arriving
+at the same box are fanned apart across its left edge, because two arrowheads on one pixel read as
+one arrow — and "two edges into one node" is the fact this page exists to show.
+
+Neither axis is capped. The canvas is one 150px column per rank with a 96px arrow gap between
+columns, and as tall as its biggest rank needs; 
+`.gwrap` scrolls it sideways; the SVG carries an explicit pixel width and `max-width:none`, so it is
+never scaled to fit a narrow screen. Shrinking 10.5px refs to fit a phone would cost the page the
+thing it is for; the adjacency list below is the small-screen answer.
 
 ## Within a rank there is no order; between ranks there is
 
-The two facts are drawn as two different things, because for a while they were drawn as the same
-thing. A rank wider than five wraps onto extra rows, and a wrapped row is the same shape as a rank:
-five boxes with a gap above and below. Twenty independent PRs at rank 0 came out as four such rows
-and the picture said "these five, then these five, then these five, then these five" about PRs that
-have no dependency on one another at all. The only thing distinguishing "next row" from "next rank"
-was 12 pixels of whitespace against 54 — a difference a reader has to *measure*.
+The two facts are drawn on **two different axes**, because for a while they were drawn as the same
+shape. When ranks were stacked vertically, a rank wider than five wrapped onto extra rows — and a
+wrapped row is the same shape as a rank: five boxes with a gap above and below. Twenty independent
+PRs at rank 0 came out as four such rows, so the picture said "these five, then these five, then
+these five, then these five" about PRs that have no dependency on one another at all. The only thing
+distinguishing "next row" from "next rank" was 12 pixels of whitespace against 54 — a difference a
+reader has to *measure*.
 
-So a rank is drawn as **one bordered card** enclosing all of its rows, and it states on itself, in
-its own header, that its members are independent: `ANY ORDER · these 20 are independent of each
-other`. Between two cards there is a gap no card covers, carrying an arrow and the word `then`. A
-wrapped row is now visibly inside something; a rank boundary is visibly between two things.
+Rotating the drawing is what removes the ambiguity rather than annotating it. Order is now the
+horizontal axis and nothing else, a rank is one **column**, and a rank is never folded, so "same
+rank" and "next rank" are not the same shape at any width: same rank is the same x, next rank is a
+different x. There is nothing left to measure. Each column header still says it in words as well
+(`20 PRs · any order`), because the drawing should not have to be inferred from its own geometry.
 
-The claim is checked rather than assumed. Two nodes at one rank *cannot* depend on each other — an
-edge forces its head at least one rank above its tail — with one exception: an edge cut to break a
-cycle contributes no depth and can leave both ends on one rank. `rankCensus()` looks for exactly
-that, and a rank carrying one says `CYCLE` instead of claiming an independence it does not have.
+The claim is checked rather than assumed. Two nodes at one rank *cannot* depend on each other — a
+drawn edge forces its head at least one rank later than its tail — with one exception: an edge cut
+to break a cycle contributes no depth and can leave both ends on one rank. `rankCensus()` looks for
+exactly that, and a column carrying one says `a cycle is cut here` instead of claiming an
+independence it does not have.
 
-The list underneath had the same defect for the same reason: a plain vertical run of PRs reads as a
-running order, and grouping by repo scatters the PRs that share a rank. It now says outright that it
-is not a running order, repeats that under every repo heading, and puts the rank on every single row
-(`∥ rank 1 of 2 · any order among the 20 in it`), so the fact travels with each PR rather than
-living in a legend.
+The list underneath has the same defect for the same reason, and no rotation can fix it: a plain
+vertical run of PRs reads as a running order, and grouping by repo scatters the PRs that share a
+rank. So it says outright that it is not a running order, repeats that under every repo heading, and
+puts the rank on every single row (`∥ rank 1 of 2 · any order among the 20 in it`), so the fact
+travels with each PR rather than living in a legend.
 
 That is three passes and no more. There are three edges on this page today; a crossing minimiser for
 three edges would be a liability, not an asset.
@@ -90,7 +122,8 @@ An SVG cannot degrade the way a `<ul>` does, so the page does not rely on it. **
 in the diagram is also written out** under the repo headings as an adjacency list: each PR appears
 once, and each of its edges is named on it in both directions (`needs first` in, `needed by` out),
 with the status, the release gate and the reason. With the stylesheet off, or with the SVG not
-rendering at all, the dependency information is fully intact.
+rendering at all, the dependency information is fully intact — including the rank badge, which is
+how the list carries the "no order inside a rank" fact that the columns carry in the drawing.
 
 Inside the diagram the `<svg>` carries `role="img"` plus a `<title>` and `<desc>` naming the
 direction and pointing at the list; each box carries a `<title>` with the PR's full title. Nothing
@@ -162,7 +195,7 @@ deliberately says "base is red too" and not "this PR is fine".
 
 ```sh
 GH_TOKEN=$(gh auth token) node build.mjs   # writes dist/index.html
-GH_TOKEN=$(gh auth token) node test.mjs    # 58 tests
+GH_TOKEN=$(gh auth token) node test.mjs    # 70 tests
 python3 -m http.server -d dist             # look at it
 ```
 
