@@ -4,6 +4,16 @@ Open PRs across `snapshot-labs`, grouped by repo and drawn as a **merge-order tr
 stack is visible at a glance. Static HTML, no server, no database: a GitHub Action runs
 `node build.mjs` on a schedule and publishes `dist/index.html`.
 
+## Where it is deployed
+
+**Live: <https://snapshot-labs.github.io/pr-dashboard/>**
+
+The intended host is Netlify, and the deploy step is written and ready in `.github/build.yml` —
+it is skipped until `NETLIFY_AUTH_TOKEN` and `NETLIFY_SITE_ID` exist as repo secrets, because no
+Netlify credential was available to the account that built this. GitHub Pages is serving in the
+meantime so the page is actually usable; adding the two secrets switches Netlify on with no code
+change, and Pages can then be turned off or left as a mirror.
+
 ## Declaring a dependency
 
 The syntax is documented **on the page itself** (top of the dashboard), which is the copy that
