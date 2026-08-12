@@ -60,14 +60,19 @@ something anyone recognises, and the point of the picture is to see what merges 
 opening twenty tabs. The title wraps over up to three lines and is cut with an `…` past that, and the
 card is as tall as its own title. The ref stays, because it is how people refer to these.
 
-Everything that was a status label is **off the card**: CI wording, `draft`, the rank badge, the
+**The card is filled by the PR's state** — open, draft or merged. See
+[What a card's colour means](#what-a-cards-colour-means).
+
+Everything else that was a status label is **off the card**: CI wording, the rank badge, the
 `no prerequisites` / `blocked ×N` pair. None of them is a dependency or a merge order, and together
-they were most of the card. Three markers survive, each with a legend entry under the drawing,
-because each one changes *whether or when* something can merge:
+they were most of the card. `draft` was one of them and came back as a fill, which costs no line.
+Three markers survive, each with a legend entry under the drawing, because each one changes
+*whether or when* something can merge:
 
 | Marker | Where | Means |
 |---|---|---|
 | `◇ @handle` | on a card | not `PR_AUTHOR`'s PR, so not theirs to merge |
+| dashed outline | on a card | not one of `PR_AUTHOR`'s open PRs: somebody else's, or a prerequisite of theirs that has already merged |
 | `⊘ …` | on a card | the PR's **own title** says do not merge |
 | `GATED` | on an **edge** | release-gated: a published release clears it, a merge does not |
 
@@ -135,6 +140,50 @@ three edges would be a liability, not an asset.
 is not drawn. It is still **named** — in a notice under the drawing and in the SVG's `<desc>` — so a
 declaration somebody wrote in a PR body is never silently swallowed just because it cannot be drawn.
 
+## What a card's colour means
+
+A card's fill is the **state of the pull request**, and it is the only thing on the page that colour
+is spent on.
+
+| fill | glyph | state |
+|---|---|---|
+| green | `○` | open |
+| grey | `◌` | draft |
+| purple | `●` | merged |
+| red | `✕` | closed without merging |
+
+Every card also prints the glyph **and the word** on its ref line, opposite the ref, so none of this
+rests on telling one colour from another. The glyphs are a progression — hollow, dotted, solid — that
+survives greyscale and a monochrome printer; the fills are deliberately near-isoluminant washes,
+because a PR title has to stay legible on top of one. Light and dark theme the four fills separately
+rather than dimming one set, and no two states share a fill or a border in either scheme. The tests
+check that.
+
+**GitHub has no draft state**, so the mapping cannot be read off one field. A pull request carries
+three independent ones: `state`, which is only ever `open` or `closed`; `draft` (`isDraft` in
+GraphQL), a *flag*; and `merged_at`, null until it merges. A draft is therefore an **open** PR with a
+flag set, not a third value of `state`, and a merged PR is a **closed** one with a timestamp, which
+is the only thing separating it from a PR that was closed and thrown away. `src/state.mjs` reads
+`merged_at` first, then `state`, and checks the flag only inside the open branch — so a PR closed
+while still a draft reads *closed*, not *draft*. It never reads `merged`, because the pulls *list*
+endpoint does not return that field.
+
+**Which merged PRs are drawn.** This is an open-PR page: the query is `is:pr is:open`, so nothing
+merged is ever picked up as a card. A merged PR appears in exactly one situation — an open PR here
+declares it as a prerequisite — and then it is worth drawing, because it is a blocker that has
+already gone away, which is merge-order information. It is always the *target* of an arrow, never a
+card of its own, and `mergedNonPrerequisites()` fails the build rather than ship a page where one got
+in some other way. Sweeping in every merged PR in the org would bury the open ones under hundreds of
+finished ones. The arrow leaving one is toned down and labelled `✓ MET`, because a merged card with
+an ordinary arrow on it reads as a live blocker.
+
+**Merged is not the same as satisfied.** A release-gated prerequisite can be merged and still be
+blocking: the card is filled merged because that is what the PR *is*, while the edge keeps its
+`GATED` label and its hover text still reads `merged, awaiting release`. The fill is a property of a
+PR; whether a dependency is cleared is a property of an *edge*.
+
+Today's build: **19 open, 3 draft, 0 merged.**
+
 ## Accessibility, and what removing the list cost
 
 The page used to carry a second, complete copy of the graph underneath: a per-repo list where every
@@ -149,8 +198,10 @@ PRs stand in it, that they are in any order among themselves, and every edge wri
 first (`stamp#504 before stamp#491`), including release gates and including edges cut to break a
 cycle. Every node and every edge additionally carries a `<title>` of its own — the node's one gives
 the full untruncated PR title, its CI verdict, and the edges it sits on in both directions. Nothing
-is encoded by colour or line style alone: each marker ships a glyph plus words, and the dashed
-outline on somebody else's card always arrives with the `◇ @handle` that explains it.
+is encoded by colour or line style alone: each marker ships a glyph plus words, the dashed outline on
+somebody else's card always arrives with the `◇ @handle` that explains it, and the card fill is
+printed on the card as a glyph and a word as well as named in the `<desc>` and in the card's hover
+title. The `<desc>` marks any card that is not open, and leaves open unmarked as the usual case.
 
 **What is genuinely lost.** With `role="img"` a screen reader treats the SVG as one atomic image and
 announces the `<title>` and `<desc>` only — the per-node and per-edge `<title>`s are *not* exposed as
@@ -237,6 +288,9 @@ fenced code blocks or blockquotes are ignored — so quoting another PR body, or
 widest of the labels that had to go to make room for titles. It is still computed, and it reaches the
 page as one phrase in the card's hover title — nowhere else.
 
+It gave up the colour channel too. The fill means state now, so there is no CI colour anywhere on the
+canvas; the distinction below is intact, but you get it by hovering.
+
 The attribution is unchanged: for each failing check on the PR head, the same-named check is looked
 up on the tip of the base branch. Failing on both sides reads *red, but base is red too*; failing
 only on the PR reads *red on its own*; a mix reads *red: partly its own*. That is attribution by
@@ -260,8 +314,9 @@ python3 -m http.server -d dist             # look at it
 
 ### Private repos
 
-Two of the repos in scope (`laser`, `nickai-app-fork`) are private, and the built page is served
-publicly. By default those PRs are **withheld**, and the page says so, with a count — it does not
+Two of the repos in scope are private, and the built page is served
+publicly. They are not named here either: a repo name is part of what is withheld, so it does not
+appear on the page, in this README, or in the tests. By default those PRs are **withheld**, and the page says so, with a count — it does not
 quietly drop them. Set `INCLUDE_PRIVATE=true` only for a build that is not public.
 
 The count measures what privacy is hiding and nothing else, so it counts only PRs the page **would

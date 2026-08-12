@@ -12,13 +12,37 @@
 // node and edge -- so the structure is still reachable without seeing the
 // picture. See src/graph.mjs graphDesc().
 
-import { esc, graphCss, graphSvg, layoutGraph } from './graph.mjs';
+import { esc, graphCss, graphSvg, layoutGraph, nodeState } from './graph.mjs';
+import { STATE_GLYPH, STATE_WORD } from './state.mjs';
+
+// The card-fill key.
+//
+// open, draft and merged are always listed, because they are what the fill means
+// and a reader needs to know what a colour they have not seen yet would have
+// meant. closed and unknown are listed only when one is actually on the page: a
+// key to a colour nothing uses is noise.
+const FILL_NOTE = {
+  merged: ' — a prerequisite that has already landed',
+  closed: ' — closed without merging',
+  unknown: ' — could not be read'
+};
+export function fillKey(statesPresent) {
+  return ['open', 'draft', 'merged']
+    .concat(['closed', 'unknown'].filter(s => statesPresent.has(s)))
+    .map(
+      s =>
+        `<span><span class="sw st-${s}">${STATE_GLYPH[s]}</span>${esc(STATE_WORD[s])}` +
+        `${esc(FILL_NOTE[s] || '')}</span>`
+    )
+    .join('\n');
+}
 
 export function render({ graph, author, org, generatedAt, withheld, total }) {
   if (!graph.layout) graph.layout = layoutGraph(graph);
   const drawn = graph.edges.filter(e => !e.cycle);
   const cut = graph.edges.filter(e => e.cycle);
   const svg = graphSvg(graph);
+  const fillLegend = fillKey(new Set(graph.nodes.map(n => nodeState(n).state)));
 
   // A declared dependency that closes a cycle cannot be drawn as an arrow. It is
   // still said out loud, here and in the SVG's <desc>: dropping it silently would
@@ -74,6 +98,16 @@ export function render({ graph, author, org, generatedAt, withheld, total }) {
   --rule:#e1e0d9; --ring:rgba(11,11,11,.10);
   --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b;
   --good-ink:#006300; --warning-ink:#7a5200; --serious-ink:#8c3d1a; --critical-ink:#a52020;
+  /* CARD FILL = PR STATE. GitHub's own PR colours, so it is a mapping a reader
+     already knows: green open, grey draft, purple merged, red closed. Kept as
+     low-saturation washes because every card carries one and a PR title has to
+     stay legible on top of it. The -line variable is the border and the glyph,
+     the darker end of the same hue. The fills are near-isoluminant on purpose,
+     so what survives greyscale is the glyph and the word, not the wash. */
+  --state-open:#e8f5ec;   --state-open-line:#1a7f37;
+  --state-draft:#e7e6df;  --state-draft-line:#56554e;
+  --state-merged:#f1eafc; --state-merged-line:#6b3cc0;
+  --state-closed:#fbeceb; --state-closed-line:#cf222e;
 }
 @media (prefers-color-scheme:dark){
   :root{
@@ -81,6 +115,13 @@ export function render({ graph, author, org, generatedAt, withheld, total }) {
     --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
     --rule:#2c2c2a; --ring:rgba(255,255,255,.10);
     --good-ink:#4cc44c; --warning-ink:#fab219; --serious-ink:#ec835a; --critical-ink:#e46a6a;
+    /* Dark mode is not the light wash dimmed: the fill goes DARKER than the card
+       surface and the border and glyph go brighter, so the light-fill/dark-edge
+       relationship is inverted rather than lost. */
+    --state-open:#173322;   --state-open-line:#4cc44c;
+    --state-draft:#37372f;  --state-draft-line:#b6b5aa;
+    --state-merged:#282141; --state-merged-line:#a371f7;
+    --state-closed:#3a2221; --state-closed-line:#e46a6a;
   }
 }
 *{box-sizing:border-box}
@@ -145,6 +186,14 @@ footer{margin-top:40px;padding-top:12px;border-top:1px solid var(--rule);font-si
     marked <code>◇ @handle</code>, including one that starts a chain and has prerequisites of its
     own. An unmarked card is ${esc(author)}'s — that marker is the only thing that says whose a PR
     is, so read it.</li>
+<li><strong>The colour a card is filled with is the state of that PR</strong> —
+    <span class="sw st-open">${STATE_GLYPH.open}</span>open,
+    <span class="sw st-draft">${STATE_GLYPH.draft}</span>draft, or
+    <span class="sw st-merged">${STATE_GLYPH.merged}</span>merged. It says nothing about whether a
+    PR is <em>ready</em>; that is what the arrows say. Every card also prints its state as a glyph
+    and a word beside its ref, so none of it rests on telling one colour from another. A
+    <strong>merged</strong> card is only ever a prerequisite that has already landed — this page
+    lists open PRs, and a merged one is drawn only when something open still points at it.</li>
 </ul>
 </div>
 
@@ -159,15 +208,20 @@ Hovering a card or an arrow gives the full title and the edges it sits on.</figc
 <div class="gwrap">
 ${svg}
 </div>
+<p class="legend fills">
+<span><span class="k">card fill</span> the state of the PR</span>
+${fillLegend}
+</p>
 <p class="legend">
 <span><span class="k">left to right</span> merge order</span>
 <span><span class="k">arrow</span> merge the tail before the head</span>
 <span><span class="k">same column</span> one rank — no order between them</span>
 <span><span class="k">dashed line</span> crosses repos</span>
-<span><span class="k">dashed card</span> not ${esc(author)}'s PR</span>
+<span><span class="k">dashed card</span> not one of ${esc(author)}'s open PRs</span>
 <span><span class="k">◇ @handle</span> whose PR it is, when it is not ${esc(author)}'s to merge</span>
 <span><span class="k crit">⊘</span> the PR's own title says do not merge</span>
 <span><span class="k gate">GATED</span> release-gated: a published release, not just a merge</span>
+<span><span class="k met">✓ MET</span> that prerequisite has already landed</span>
 </p>
 </figure>
 

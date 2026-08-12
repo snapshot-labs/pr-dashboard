@@ -30,6 +30,23 @@
 // is now ONE box with an arrow into stamp#491 and nothing duplicated. The
 // duplication was a workaround for the tree shape, not a fact about the data.
 //
+// WHAT A CARD'S FILL MEANS: the state of the pull request -- open, draft, or
+// merged (and closed, for a prerequisite that was abandoned). Derived in
+// src/state.mjs from three separate fields, because GitHub has no "draft" state:
+// a draft is an OPEN PR with `draft: true` on it, and a merged PR is a CLOSED
+// one with a non-null `merged_at`. Every fill is also printed on the card as a
+// glyph and a word, so nothing here is signalled by colour alone.
+//
+// Merged is the state that needed a decision, since every PR this build fetches
+// is open. A merged PR is drawn only as a PREREQUISITE that has already landed,
+// never as a card of its own -- see mergedNonPrerequisites(), which fails the
+// build if one ever gets in another way.
+//
+// CI attribution is still computed and still keeps its distinction (red on its
+// own vs red because the base is red), but it is not on the card face at all:
+// the cards carry titles, and the fill spends the colour channel on state. It
+// survives as one phrase in the card's hover text.
+//
 // The drawing is a layered layout emitted as inline SVG at build time (see
 // src/graph.mjs). No Mermaid, no d3, no CDN, no <script> tag: the page stays a
 // single static file.
@@ -52,6 +69,7 @@ import {
 } from './src/github.mjs';
 import { parseDeclarations } from './src/declarations.mjs';
 import { classify } from './src/ci.mjs';
+import { openPrState, PR_STATES, prState } from './src/state.mjs';
 import { layoutGraph, shortRef } from './src/graph.mjs';
 import { render } from './src/render.mjs';
 
@@ -123,6 +141,10 @@ export function prRecord(full, repo, meta) {
     url: full.html_url,
     author: full.user ? full.user.login : null,
     draft: Boolean(full.draft),
+    // What the card is filled with. Derived from the payload rather than
+    // assumed: see src/state.mjs on why `draft` is a flag on an OPEN PR and why
+    // `merged_at` has to be read before `state`.
+    state: prState(full),
     head: full.head.ref,
     headSha: full.head.sha,
     base: full.base.ref,
@@ -199,7 +221,11 @@ export async function resolveDeps(pr, repoMeta) {
         needsRelease: false,
         reason: `branched from ${pr.base}`,
         satisfied: false,
-        status: 'open'
+        status: 'open',
+        // A stack parent comes from the open-PR list, so it is open or draft.
+        // "open" and "draft" are both true of a draft PR -- the flag does not
+        // contradict the status, it refines it.
+        targetState: prState(basePr)
       })
     );
   }
@@ -220,7 +246,8 @@ export async function resolveDeps(pr, repoMeta) {
       needsRelease: d.needsRelease,
       reason: d.reason,
       declared: d.raw,
-      unreadable: !target
+      unreadable: !target,
+      targetState: prState(target)
     };
     Object.assign(edge, await resolveStatus(edge, target));
     pr.deps.push(markAuthor(edge));
@@ -344,6 +371,12 @@ async function main() {
     // Not a warning and not a footnote. One PR is one node, or the page is wrong.
     throw new Error(`a PR was built into more than one node: ${dupes.join(', ')}`);
   }
+  const strays = mergedNonPrerequisites(graph);
+  if (strays.length) {
+    throw new Error(
+      `a merged PR was drawn as something other than a prerequisite: ${strays.join(', ')}`
+    );
+  }
 
   // --- CI attribution ----------------------------------------------------
   //
@@ -371,6 +404,10 @@ async function main() {
   console.log(
     `graph: ${graph.nodes.length} node(s), ${graph.edges.length} edge(s), ` +
       `${graph.layout.maxRank + 1} rank(s), ${graph.layout.width}x${graph.layout.height} canvas`
+  );
+  console.log(
+    'card fill: ' +
+      PR_STATES.map(st => `${st} ${graph.nodes.filter(n => n.state === st).length}`).join(', ')
   );
   console.log(
     `components: ${componentsOf(graph.nodes).length} drawn, each holding at least one PR by ` +
@@ -519,6 +556,11 @@ export function buildGraph(prs, mine = () => true) {
       // Only somebody else's node states its state: the page's whole premise is
       // that my own are open, so saying "open" on each of mine is noise.
       status: own ? undefined : pr.status || 'open',
+      // The fill. Every PR this build FETCHES is open, mine or not: the search
+      // is `is:open` and the component sweep reads open PRs only. So a card
+      // built from a record is open or draft, and merged reaches the page by
+      // exactly one other route -- as an edge target, just below.
+      state: pr.state || openPrState(pr),
       pr,
       needs: [],
       neededBy: []
@@ -546,6 +588,13 @@ export function buildGraph(prs, mine = () => true) {
           foreign: Boolean(d.foreign),
           hidden: Boolean(d.hidden),
           status: d.status,
+          // A prerequisite is the ONLY way a merged PR reaches this page, and
+          // this is where that happens: it is the target of somebody's edge, so
+          // drawing it says something about merge order. `status` is how the
+          // EDGE resolved ("merged, awaiting release"); `state` is what the PR
+          // itself is. A release-gated prerequisite can be merged and still not
+          // satisfy its edge, so the two are kept apart deliberately.
+          state: d.targetState || 'unknown',
           edge: d,
           needs: [],
           neededBy: []
@@ -658,6 +707,28 @@ export function rankNodes(graph) {
 // shared prerequisite, so the old build labelled every copy with where the others
 // were. A graph has no such excuse: two nodes for one PR is a bug, and the build
 // fails on it rather than shipping a page that shows one PR twice.
+// WHEN A MERGED PR IS ALLOWED ON THIS PAGE.
+//
+// Every PR this build fetches is open: the seed search is `is:pr is:open`, and
+// the component sweep reads a repo's OPEN pull requests. So nothing merged is
+// ever picked up as a card of its own. A merged PR earns a place in exactly one
+// way -- something drawn here declares it as a prerequisite -- and then drawing
+// it is real merge-order information: that is a blocker which has already gone
+// away. It is the target of an edge and nothing else, so it always sits to the
+// LEFT of the PR it unblocked and always has at least one arrow leaving it.
+//
+// The alternative, sweeping in every merged PR in the org, would bury the twenty
+// open ones under hundreds of finished ones and answer a question nobody asked.
+//
+// So: merged means prerequisite, and this asserts it instead of trusting the
+// search string -- the same reason duplicateNodes() is an assertion and not a
+// footnote.
+export function mergedNonPrerequisites(graph) {
+  return graph.nodes
+    .filter(n => n.state === 'merged' && (n.kind === 'own' || n.neededBy.length === 0))
+    .map(n => n.key);
+}
+
 export function duplicateNodes(graph) {
   const seen = new Map();
   for (const n of graph.nodes) seen.set(n.key, (seen.get(n.key) || 0) + 1);

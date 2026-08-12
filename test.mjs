@@ -10,6 +10,7 @@ import {
   duplicateNodes,
   groupNodes,
   isMineFor,
+  mergedNonPrerequisites,
   redactPrivate,
   resolveDeps,
   resolveStatus
@@ -22,6 +23,8 @@ import {
   layoutGraph,
   NODE_H,
   NODE_W,
+  nodeState,
+  nodeTitleText,
   rankCensus,
   RANK_GAP,
   shortRef,
@@ -31,6 +34,7 @@ import {
 } from './src/graph.mjs';
 import { render } from './src/render.mjs';
 import { getPr } from './src/github.mjs';
+import { openPrState, PR_STATES, prState, STATE_GLYPH } from './src/state.mjs';
 
 let pass = 0;
 const t = async (name, fn) => {
@@ -109,6 +113,57 @@ await t('all green -> green', () => {
 });
 await t('still running -> pending', () => {
   assert.equal(classify([{ name: 'Test', status: 'in_progress' }], []).state, 'pending');
+});
+
+// The card fill. GitHub has no "draft" state: a pull request carries `state`
+// ("open" | "closed"), a separate `draft` flag (`isDraft` in GraphQL), and
+// `merged_at`. These assert the mapping against the SHAPE OF THE REAL PAYLOAD,
+// and the live block at the bottom of this file checks that shape is still what
+// GitHub sends.
+console.log('PR state -> the colour a card is filled with');
+await t('an open PR with the flag clear is open', () => {
+  assert.equal(prState({ state: 'open', draft: false, merged_at: null }), 'open');
+});
+await t('a DRAFT is an open PR with the flag set, not a third state value', () => {
+  assert.equal(prState({ state: 'open', draft: true, merged_at: null }), 'draft');
+});
+await t('MERGED is read off merged_at, because state says "closed" for it', () => {
+  // The trap: a merged PR's `state` is "closed", exactly like one that was
+  // thrown away. merged_at is the only field that separates them.
+  assert.equal(prState({ state: 'closed', draft: false, merged_at: '2026-08-01T00:00:00Z' }), 'merged');
+});
+await t('closed and never merged is closed, not merged', () => {
+  assert.equal(prState({ state: 'closed', draft: false, merged_at: null }), 'closed');
+});
+await t('NEGATIVE: a PR closed while still a draft reads closed, not draft', () => {
+  // GitHub leaves the flag set. Reading it before `state` would hide the fact
+  // that the prerequisite is gone.
+  assert.equal(prState({ state: 'closed', draft: true, merged_at: null }), 'closed');
+});
+await t('NEGATIVE: a merged PR that still carries the draft flag reads merged', () => {
+  assert.equal(prState({ state: 'closed', draft: true, merged_at: '2026-08-01T00:00:00Z' }), 'merged');
+});
+await t('NEGATIVE: the mapping never reads `merged`, which the LIST endpoint omits', () => {
+  // /repos/{r}/pulls returns merged_at but no `merged` boolean. Trusting
+  // `merged` would classify every stack parent as unmerged.
+  assert.equal(prState({ state: 'closed', merged_at: '2026-08-01T00:00:00Z' }), 'merged');
+  assert.equal(prState({ state: 'closed', merged: true, merged_at: null }), 'closed');
+});
+await t('an unreadable target is unknown, never guessed', () => {
+  assert.equal(prState(null), 'unknown');
+  assert.equal(prState(undefined), 'unknown');
+  assert.equal(prState({}), 'unknown');
+  assert.equal(prState({ state: 'weird' }), 'unknown');
+});
+await t('an open-search PR is open or draft and nothing else', () => {
+  assert.equal(openPrState({ draft: true }), 'draft');
+  assert.equal(openPrState({ draft: false }), 'open');
+  assert.equal(openPrState({}), 'open');
+});
+await t('every state has a glyph, and no two states share one', () => {
+  const glyphs = PR_STATES.map(s => STATE_GLYPH[s]);
+  assert.ok(glyphs.every(Boolean), 'no state is colour-only');
+  assert.equal(new Set(glyphs).size, PR_STATES.length, 'the glyphs separate the states on their own');
 });
 
 // buildGraph returns nodes and edges, not a nested forest: `needs` are the edges
@@ -281,7 +336,7 @@ console.log('withheld accounting');
 const wh = (repo, number, author) => ({ repo, number, author, private: true });
 await t('withheld PRs of mine are counted, and none blocks anything', () => {
   const r = accountWithheld(
-    [wh('snapshot-labs/laser', 86, 'tony8713'), wh('snapshot-labs/nickai-app-fork', 8, 'tony8713')],
+    [wh('snapshot-labs/a-private-repo', 86, 'tony8713'), wh('snapshot-labs/another-private-repo', 8, 'tony8713')],
     [pr(2222, 'tony8713', [2219])],
     mine
   );
@@ -292,15 +347,15 @@ await t('a withheld PR that blocks a visible one is counted as blocking', () => 
     repo: 'snapshot-labs/stamp',
     number: 491,
     author: 'tony8713',
-    deps: [{ repo: 'snapshot-labs/laser', number: 86, crossRepo: true, satisfied: false }]
+    deps: [{ repo: 'snapshot-labs/a-private-repo', number: 86, crossRepo: true, satisfied: false }]
   };
-  const r = accountWithheld([wh('snapshot-labs/laser', 86, 'tony8713')], [dependent], mine);
+  const r = accountWithheld([wh('snapshot-labs/a-private-repo', 86, 'tony8713')], [dependent], mine);
   assert.deepEqual([r.count, r.referenced, r.blocking], [1, 1, 1]);
 });
 await t('a withheld PR by another author that nothing depends on is NOT counted', () => {
   // It would not be rendered even if the repo were public, so calling it
   // "withheld" would overstate what privacy is hiding.
-  const r = accountWithheld([wh('snapshot-labs/laser', 90, 'someone-else')], [pr(1, 'tony8713')], mine);
+  const r = accountWithheld([wh('snapshot-labs/a-private-repo', 90, 'someone-else')], [pr(1, 'tony8713')], mine);
   assert.equal(r.count, 0);
 });
 
@@ -328,6 +383,9 @@ const edge = (repo, number, over = {}) => ({
   reason: null,
   satisfied: false,
   status: 'open',
+  // What the build derives from the target's payload, and what the card that
+  // target becomes is filled with.
+  targetState: 'open',
   foreign: false,
   ...over
 });
@@ -746,14 +804,15 @@ await t('the CI wording is off the card face, and survives only as hover text', 
   };
   red.draft = true;
   const html = page(buildGraph([red]));
-  const onCard = [...html.matchAll(/<text class="(?:ref|ttl|mark)[^"]*"[^>]*>(.*?)<\/text>/g)]
+  const onCard = [...html.matchAll(/<text class="(?:ref|ttl|mark|st)[^"]*"[^>]*>(.*?)<\/text>/g)]
     .map(m => m[1])
     .join(' | ');
-  assert.doesNotMatch(onCard, /red on its own|draft|CI/, `card face reads: ${onCard}`);
+  assert.doesNotMatch(onCard, /red on its own|CI/, `card face reads: ${onCard}`);
   assert.doesNotMatch(html, /also failing on master/, 'and the verbose failure list is gone');
+  assert.match(onCard, /◌ draft/, 'draft is on the card face, because it is what the fill means');
   assert.match(
     html,
-    /<title>score-api#1453 — pr 1453 — red on its own — draft/,
+    /<title>score-api#1453 — pr 1453 — draft, not yet marked ready for review — red on its own/,
     'the classifier still runs; its verdict is on hover only'
   );
 });
@@ -874,7 +933,12 @@ await t("somebody else's PR is marked ◇ @handle on a dashed card, with a legen
   const p = sp(2222, [edge('snapshot-labs/sx-monorepo', 2219, { kind: 'stack', author: 'wa0x6e', foreign: true })], 'snapshot-labs/sx-monorepo');
   const html = page(buildGraph([p]));
   assert.match(html, /<tspan class="g">◇<\/tspan> @wa0x6e<\/text>/, 'compacted, but still on the card');
-  assert.match(html, /<g class="node dep">/, 'on a dashed card');
+  assert.match(html, /<g class="node dep st-open">/, 'on a dashed card, filled by its state');
+  assert.match(
+    html,
+    /<span class="k">dashed card<\/span> not one of tony8713's open PRs/,
+    'and the dash means referenced, which covers a merged prerequisite of his own too'
+  );
   assert.match(html, /@wa0x6e — not yours to merge/, 'and the card title says what it means');
   assert.match(
     html,
@@ -893,7 +957,7 @@ await t('a foreign ROOT is marked too, and so is every foreign card behind it', 
   );
   const html = page(g);
   assert.equal(occurrences(html, '<tspan class="g">◇</tspan> @wa0x6e</text>'), 2, 'both marked');
-  assert.equal(occurrences(html, '<g class="node dep">'), 2, 'and both cards dashed');
+  assert.equal(occurrences(html, '<g class="node dep '), 2, 'and both cards dashed');
   assert.equal(occurrences(html, '@wa0x6e — not yours to merge'), 2, 'in the hover title too');
   assert.match(html, /1 open PR/, 'one open PR of mine, not three');
 });
@@ -1135,6 +1199,210 @@ await t('graphDesc names every node and every edge, one sentence per column', ()
   assert.equal(occurrences(desc, ' before '), g.edges.length, 'and every edge, once');
 });
 
+console.log('the fill is the state, said in a colour AND in a word');
+
+// A prerequisite that is not one of the open PRs becomes a dep node, which is
+// the only way anything merged reaches this page.
+const mergedEdge = (repo, number, over = {}) =>
+  edge(repo, number, { targetState: 'merged', satisfied: true, status: 'merged', ...over });
+const draftPr = (number, repo = 'snapshot-labs/sx-monorepo') => {
+  const p = sp(number, [], repo);
+  p.draft = true;
+  return p;
+};
+
+await t('an open PR is filled open; a draft is filled draft', () => {
+  const g = buildGraph([sp(504), draftPr(2266)]);
+  assert.equal(nodeState(at(g, `${S}#504`)).state, 'open');
+  assert.equal(nodeState(at(g, 'snapshot-labs/sx-monorepo#2266')).state, 'draft');
+});
+await t('...and the state the build derived wins over the raw flag', () => {
+  const p = sp(1);
+  p.draft = false;
+  p.state = 'draft';
+  assert.equal(nodeState(at(buildGraph([p]), `${S}#1`)).state, 'draft');
+});
+await t('the card carries the fill CLASS, the glyph AND the word, never the colour alone', () => {
+  const g = buildGraph([sp(504), draftPr(2266), sp(491, [mergedEdge(S, 457)])]);
+  const html = page(g);
+  assert.match(html, /<g class="node own st-draft">/, 'the draft card is classed draft');
+  assert.match(html, /<g class="node own st-open">/);
+  assert.match(html, /<g class="node dep st-merged">/);
+  assert.equal(occurrences(html, '<text class="st"'), g.nodes.length, 'every card says its state');
+  assert.match(html, /<text class="st"[^>]*>◌ draft<\/text>/, 'glyph and word, on the card');
+  assert.match(html, /<text class="st"[^>]*>○ open<\/text>/);
+  assert.match(html, /<text class="st"[^>]*>● merged<\/text>/);
+  assert.match(html, /svg\.depgraph \.st-draft \.box\{fill:var\(--state-draft\)/, 'and it is themed');
+});
+await t('the state word sits opposite the ref and never crowds it out', () => {
+  // The longest ref in the real set. If it survives uncut beside the state,
+  // every shorter one does.
+  const p = sp(368, [], 'snapshot-labs/snapshot-relayer');
+  const c = cardOf(at(buildGraph([p]), 'snapshot-labs/snapshot-relayer#368'));
+  assert.equal(c.ref, 'snapshot-relayer#368', 'not truncated');
+  assert.equal(c.stateText, '○ open');
+  const room = NODE_W - 20;
+  assert.ok(
+    textWidth(c.ref, 10.5, true) + textWidth(c.stateText, 9.5) <= room,
+    'the two fit on one line together'
+  );
+});
+await t('hovering a card names its state in a whole sentence', () => {
+  const g = buildGraph([draftPr(2266)]);
+  const n = at(g, 'snapshot-labs/sx-monorepo#2266');
+  assert.match(nodeTitleText(n), /— draft, not yet marked ready for review —/);
+  assert.match(page(g), /— draft, not yet marked ready for review —/);
+});
+
+console.log('a merged PR is drawn only as a prerequisite that has landed');
+await t('a merged prerequisite is one dep card, to the LEFT of what it unblocked', () => {
+  const g = buildGraph([sp(491, [mergedEdge(S, 457)])]);
+  const n = at(g, `${S}#457`);
+  assert.equal(n.kind, 'dep', 'never a card of its own');
+  assert.equal(nodeState(n).state, 'merged');
+  assert.deepEqual(neededBy(n), [`${S}#491`], 'it is on the tail of an edge');
+  assert.equal(n.rank, 0);
+  assert.equal(at(g, `${S}#491`).rank, 1, 'so it sits in an earlier column');
+  assert.deepEqual(mergedNonPrerequisites(g), []);
+});
+await t("the build FAILS rather than draw a merged PR that is nobody's prerequisite", () => {
+  // The rule is asserted, not left to the search string: this page lists open
+  // PRs, and the one reason to draw a merged one is that something still open
+  // is waiting on it.
+  const stray = sp(457);
+  stray.state = 'merged';
+  assert.deepEqual(mergedNonPrerequisites(buildGraph([stray])), [`${S}#457`]);
+  const own = sp(491, [mergedEdge(S, 457)]);
+  own.state = 'merged';
+  assert.deepEqual(mergedNonPrerequisites(buildGraph([own])), [`${S}#491`]);
+});
+await t('NEGATIVE: none of the open PRs is ever filled merged or closed', () => {
+  const g = buildGraph([sp(491, [mergedEdge(S, 457)]), sp(504), draftPr(2266)]);
+  for (const n of g.nodes.filter(x => x.kind === 'own')) {
+    assert.ok(['open', 'draft'].includes(nodeState(n).state), `${n.key} is ${nodeState(n).state}`);
+  }
+});
+await t('the arrow leaving a landed prerequisite says it is cleared', () => {
+  const g = buildGraph([sp(491, [mergedEdge(S, 457)])]);
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  assert.match(html, /<path class="edge met"/, 'the arrow is toned down');
+  assert.match(html, /<text class="elabel met"[^>]*>✓ MET<\/text>/, 'and says so in words');
+  assert.match(html, /<span class="k met">✓ MET<\/span> that prerequisite has already landed/);
+});
+await t('MERGED DOES NOT MEAN CLEARED: a release-gated prerequisite is both', () => {
+  // The one case the colour could be misread. The card is filled merged because
+  // that is what the PR is; the EDGE is still unsatisfied, and says so.
+  const gated = mergedEdge(JS, 1225, {
+    crossRepo: true,
+    needsRelease: true,
+    satisfied: false,
+    status: 'merged, awaiting release'
+  });
+  const g = buildGraph([sp(491, [gated])]);
+  g.layout = layoutGraph(g);
+  const n = at(g, `${JS}#1225`);
+  assert.equal(nodeState(n).state, 'merged', 'the PR is merged');
+  assert.equal(g.edges[0].edge.satisfied, false, 'and the dependency is still not satisfied');
+  const html = page(g);
+  assert.match(html, /st-merged/);
+  assert.match(html, />GATED</);
+  assert.match(html, /merged, awaiting release/);
+  assert.doesNotMatch(html, /<text class="elabel met"/, 'the arrow is NOT drawn as cleared');
+  assert.doesNotMatch(html, /ready to merge|safe to merge/i);
+});
+await t('an edge that is both released and met keeps BOTH labels, apart', () => {
+  const released = mergedEdge(JS, 1225, {
+    crossRepo: true,
+    needsRelease: true,
+    satisfied: true,
+    status: 'released in v0.14.3'
+  });
+  const g = buildGraph([sp(491, [released])]);
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  const gatedY = Number(html.match(/<text class="elabel" x="\d+" y="(\d+)"/)[1]);
+  const metY = Number(html.match(/<text class="elabel met" x="\d+" y="(\d+)"/)[1]);
+  assert.ok(metY > gatedY + 10, `the two labels do not overlap (${gatedY} vs ${metY})`);
+  assert.match(html, />GATED</);
+});
+
+console.log('the legend and the text alternative say what the fill means');
+await t('open, draft and merged are always keyed, with swatch and glyph and word', () => {
+  const html = page(buildGraph([sp(504)]));
+  assert.match(html, /<span class="k">card fill<\/span> the state of the PR/);
+  assert.match(html, /<span class="sw st-open">○<\/span>open<\/span>/);
+  assert.match(html, /<span class="sw st-draft">◌<\/span>draft<\/span>/);
+  assert.match(html, /<span class="sw st-merged">●<\/span>merged — a prerequisite that has already landed<\/span>/);
+  assert.match(html, /The colour a card is filled with is the state of that PR/, 'and the banner');
+});
+await t('closed is keyed only when something on the page is closed', () => {
+  assert.doesNotMatch(page(buildGraph([sp(504)])), /class="sw st-closed"/);
+  const dead = buildGraph([
+    sp(491, [edge(S, 457, { targetState: 'closed', status: 'closed unmerged' })])
+  ]);
+  assert.match(page(dead), /<span class="sw st-closed">✕<\/span>closed/);
+});
+await t('the <desc> explains the fill and names every state that is not open', () => {
+  // With the per-PR list gone, this IS the text form of the page.
+  const g = buildGraph([sp(504), draftPr(2266), sp(491, [mergedEdge(S, 457)])]);
+  layoutGraph(g);
+  const desc = graphDesc(g);
+  assert.match(desc, /The fill colour of a card is the state of that pull request/);
+  assert.match(desc, /every card also prints that state as a word/);
+  assert.match(desc, /only merged pull requests drawn are prerequisites that have already landed/);
+  assert.match(desc, /sx-monorepo#2266 \(draft\)/, 'a draft is named as one');
+  assert.match(desc, /stamp#457 \(merged\)/, 'and so is a merged prerequisite');
+  assert.doesNotMatch(desc, /stamp#504 \(open\)/, 'open is the usual case and stays unmarked');
+  assert.match(desc, /stamp#457 before stamp#491, already met/, 'and the edge says it is cleared');
+});
+
+console.log('CI is off the card face entirely, and colour means one thing');
+await t('CI keeps its wording on hover and takes no room on the card', () => {
+  const red = sp(1453, [], 'snapshot-labs/score-api');
+  red.ci = { state: 'own-red', ownFailures: [{ name: 'Test' }], baseFailures: [], pending: [], total: 1, passed: 0, baseRef: 'master' };
+  const html = page(buildGraph([red]));
+  assert.match(html, /<title>score-api#1453 — pr 1453 — open, and marked ready for review — red on its own/);
+  const faces = [...html.matchAll(/<text class="(ttl|st|mark|ref)"[^>]*>([^<]*)</g)].map(m => m[2]);
+  assert.ok(!faces.some(f => /red on its own/.test(f)), 'not printed on the card itself');
+});
+await t('nothing but the state is coloured on the canvas', () => {
+  const html = page(buildGraph([sp(504)]));
+  assert.doesNotMatch(html, /svg\.depgraph \.is-(good|warning|serious|critical)/);
+  assert.doesNotMatch(html, /CI_SHORT|CI_ROLE|CI_GLYPH/);
+});
+
+console.log('the fills are distinguishable, in light mode and in dark');
+const stateVars = block =>
+  Object.fromEntries(
+    [...block.matchAll(/--state-([a-z-]+):\s*(#[0-9a-f]{3,8})/g)].map(m => [m[1], m[2]])
+  );
+await t('all four states are themed in BOTH schemes, fill and border', () => {
+  const html = page(buildGraph([sp(504)]));
+  const [light, dark] = html.split('@media (prefers-color-scheme:dark)');
+  assert.ok(dark, 'there is a dark block');
+  for (const [name, vars] of [['light', stateVars(light)], ['dark', stateVars(dark)]]) {
+    for (const s of ['open', 'draft', 'merged', 'closed']) {
+      assert.ok(vars[s], `${name}: ${s} has a fill`);
+      assert.ok(vars[`${s}-line`], `${name}: ${s} has a border`);
+      assert.notEqual(vars[s], vars[`${s}-line`], `${name}: ${s} fill and border differ`);
+    }
+    const fills = ['open', 'draft', 'merged', 'closed'].map(s => vars[s]);
+    assert.equal(new Set(fills).size, 4, `${name}: no two states share a fill`);
+    const lines = ['open', 'draft', 'merged', 'closed'].map(s => vars[`${s}-line`]);
+    assert.equal(new Set(lines).size, 4, `${name}: no two states share a border`);
+  }
+});
+await t('dark mode is re-themed, not the light wash left to fend for itself', () => {
+  const html = page(buildGraph([sp(504)]));
+  const [light, dark] = html.split('@media (prefers-color-scheme:dark)');
+  const l = stateVars(light);
+  const d = stateVars(dark);
+  for (const s of ['open', 'draft', 'merged', 'closed']) {
+    assert.notEqual(l[s], d[s], `${s} has its own dark fill`);
+  }
+});
+
 if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) {
   console.log('release gating (live API)');
   const RJS = 'snapshot-labs/snapshot.js';
@@ -1157,6 +1425,33 @@ if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) {
     const r = await resolveStatus({ repo: RJS, needsRelease: false }, await getPr(RJS, 1222));
     assert.equal(r.satisfied, true);
     assert.equal(r.status, 'merged');
+  });
+
+  console.log('the fields the fill is derived from are real (live API)');
+  await t('GitHub sends state, draft and merged_at as three separate fields', async () => {
+    // The mapping is checked against the payload rather than against a belief
+    // about it: `draft` is a real boolean, and `state` really is a two-valued
+    // field with no "draft" and no "merged" in it.
+    for (const number of [1225, 1222]) {
+      const p = await getPr(RJS, number);
+      assert.equal(typeof p.draft, 'boolean', `#${number}: draft is a field of its own`);
+      assert.ok(['open', 'closed'].includes(p.state), `#${number}: state is ${p.state}`);
+      assert.ok(PR_STATES.includes(prState(p)));
+    }
+  });
+  await t('a merged PR is state "closed" plus merged_at, and maps to merged', async () => {
+    const p = await getPr(RJS, 1222);
+    assert.equal(p.state, 'closed', 'GitHub calls a merged PR closed');
+    assert.ok(p.merged_at, 'merged_at is the field that says otherwise');
+    assert.equal(prState(p), 'merged');
+  });
+  await t("the mapping agrees with GitHub's own `merged`, which it never reads", async () => {
+    // Cross-check against the field the mapping deliberately ignores, because
+    // the pulls LIST endpoint does not return it.
+    for (const number of [1225, 1222, 1223]) {
+      const p = await getPr(RJS, number);
+      assert.equal(prState(p) === 'merged', p.merged, `#${number}`);
+    }
   });
 } else {
   console.log('release gating (live API)  SKIPPED - no GH_TOKEN');

@@ -27,15 +27,26 @@
 //
 // WHAT A CARD SAYS. A card is the PR's ref and the PR's TITLE, because a bare
 // number is not a thing anyone recognises. Everything that was a status label --
-// CI wording, draft, rank, "no prerequisites" -- is off the card: it made the
-// card wide and told the reader nothing about what merges before what. Three
-// markers survive, because each of them changes when or whether an edge clears,
-// and each has a legend entry under the drawing:
+// CI wording, rank, "no prerequisites" -- is off the card: it made the card wide
+// and told the reader nothing about what merges before what. Three markers
+// survive, because each of them changes when or whether an edge clears, and each
+// has a legend entry under the drawing:
 //
 //   ◇ @handle   this PR is not the dashboard author's, so it is not theirs to merge
 //   ⊘ ...       the PR's OWN TITLE says do not merge (lifted out of the title so
 //               that truncating the title can never hide it)
 //   GATED       on an EDGE: satisfied by a published release, not by a merge
+//
+// WHAT A CARD IS FILLED WITH: the STATE of that pull request -- open, draft,
+// merged, or closed for a prerequisite that was abandoned. Colour on this canvas
+// means that and only that, which is what makes the fill readable at all.
+// "draft" left the marker lines and became a fill, so it costs no room.
+//
+// Never colour alone. Every card prints its state as a glyph AND a word on the
+// ref line, opposite the ref: hollow for open, dotted for draft, solid for
+// merged. The glyphs are a greyscale progression, so the states separate with no
+// colour vision, on a monochrome screen and on a monochrome printer, and the
+// word is there for a reader who takes neither.
 //
 // It is a GRAPH and not a tree: a PR that TWO others need is ONE node with two
 // arrows leaving it. No node is ever drawn twice.
@@ -50,6 +61,7 @@
 // carries a <title> of its own.
 
 import { CI_LABEL } from './ci.mjs';
+import { PR_STATES, STATE_CLASS, STATE_GLYPH, STATE_LABEL, STATE_WORD } from './state.mjs';
 
 export const esc = s =>
   String(s ?? '')
@@ -126,7 +138,7 @@ bucket(0.66, 'EhnuSbdgpq$0123456789{}K');
 bucket(0.72, 'VXZBRCA');
 bucket(0.78, 'UNHD◇');
 bucket(0.82, 'GQO&');
-bucket(0.88, 'w#+<=>^~⊘✓✗');
+bucket(0.88, 'w#+<=>^~⊘✓✗○◌●✕');
 bucket(0.92, 'M');
 bucket(1.0, '%mW');
 bucket(1.06, '@…—');
@@ -225,9 +237,28 @@ export function splitHold(title) {
   return { title: s, hold: null };
 }
 
+// WHAT THE CARD IS FILLED WITH: the state of the pull request.
+//
+// One place, so the fill, the glyph and word on the card, the swatch in the
+// legend and the sentence in the <desc> are all reading the same value and
+// cannot disagree. The glyph is not decoration: it is the second channel, so a
+// reader who cannot separate the fills still separates the states.
+export function nodeState(n) {
+  const state = PR_STATES.includes(n.state) ? n.state : 'unknown';
+  return {
+    state,
+    cls: STATE_CLASS(state),
+    glyph: STATE_GLYPH[state],
+    word: STATE_WORD[state],
+    label: STATE_LABEL[state]
+  };
+}
+
 // The markers a card is allowed to carry. Everything else that used to be a
 // badge is gone; these three stay because each one changes whether or when
 // something can merge, and each is explained in the legend under the drawing.
+//
+// "draft" is not among them: it is the card's FILL now, which costs no line.
 //
 // The authorship marker earns its place twice over since the page started drawing
 // whole components. It used to sit on a card that could only ever be the target of
@@ -255,8 +286,16 @@ export function cardOf(n) {
     ...m,
     text: clipToWidth(m.text, TEXT_W - 12, MARK_SIZE)
   }));
+  // The state shares the ref's line, pinned to the right edge, so it costs the
+  // card no height at all -- and the ref is measured against what is left rather
+  // than against the whole width, so the two can never collide.
+  const state = nodeState(n);
+  const stateText = `${state.glyph} ${state.word}`;
+  const refRoom = TEXT_W - textWidth(stateText, MARK_SIZE) - 10;
   return {
-    ref: clipToWidth(nodeRef(n), TEXT_W, REF_SIZE, true),
+    ref: clipToWidth(nodeRef(n), refRoom, REF_SIZE, true),
+    state,
+    stateText,
     title: shown,
     fullTitle: n.title || null,
     hold,
@@ -272,9 +311,11 @@ export function cardOf(n) {
 export function nodeTitleText(n) {
   const bits = [nodeRef(n)];
   bits.push(n.title || (n.hidden ? 'title withheld (private repo)' : 'title unavailable'));
+  // The state in words, for every card and not only for a draft: this is the
+  // fill spelled out, and it is what a reader gets who cannot use the colour.
+  bits.push(nodeState(n).label);
   if (n.kind === 'own') {
     if (n.pr && n.pr.ci) bits.push(CI_LABEL[n.pr.ci.state] || 'CI state unknown');
-    if (n.pr && n.pr.draft) bits.push('draft');
   } else if (n.hidden) bits.push('private repo, details withheld');
   else if (!n.author) bits.push('author unknown');
   else if (n.foreign) bits.push(`@${n.author} — not yours to merge`);
@@ -482,17 +523,20 @@ export function columnLabel(r, maxRank, count, unordered = true) {
 // How a card is named in the description: its ref, and its author when that
 // author is not the page's. Same rule as the `◇` marker on the card itself, in
 // the one place a reader who cannot see the card will find it.
-export const descRef = n =>
-  nodeRef(n) +
-  (n.hidden
-    ? ' (private repository, details withheld)'
-    : n.kind === 'own'
-      ? ''
-      : !n.author
-        ? ' (author unknown)'
-        : n.foreign
-          ? ` (by @${n.author}, not the page author's)`
-          : '');
+export const descRef = n => {
+  const notes = [];
+  if (n.hidden) notes.push('private repository, details withheld');
+  else if (n.kind !== 'own') {
+    if (!n.author) notes.push('author unknown');
+    else if (n.foreign) notes.push(`by @${n.author}, not the page author's`);
+  }
+  // And what state it is in, for the same reason: open is what nearly every
+  // card is, so it is left unsaid, and anything else is named. A reader who
+  // never sees the fill still learns that a prerequisite has already landed.
+  const state = nodeState(n).state;
+  if (state !== 'open') notes.push(nodeState(n).word);
+  return notes.length ? `${nodeRef(n)} (${notes.join('; ')})` : nodeRef(n);
+};
 
 export function graphDesc(graph) {
   const drawn = (graph.edges || []).filter(e => !e.cycle);
@@ -518,10 +562,16 @@ export function graphDesc(graph) {
     // dependency chains on the strength of one pull request in them belonging to
     // the page author -- so a card named here without its author would read as
     // the page author's by default, which is the one thing the marking exists to
-    // stop.
+    // stop. The same argument applies to the fill: a card named by its ref alone
+    // would read as open, since open is what nearly all of them are.
     'A whole dependency chain is drawn whenever at least one pull request in it belongs to the' +
       ' page author, so some of the cards below are somebody else\'s. Every one that is not the' +
       ' page author\'s names its author where it is listed; the rest are the page author\'s own.',
+    'The fill colour of a card is the state of that pull request, and every card also prints that' +
+      ' state as a word beside its reference, so nothing here is carried by colour alone. Open is' +
+      ' the usual case and is left unmarked below; anything else is named in brackets after the' +
+      ' reference. The only merged pull requests drawn are prerequisites that have already' +
+      ' landed.',
     'The whole structure follows, in words.'
   ];
 
@@ -551,7 +601,8 @@ export function graphDesc(graph) {
                 `${nodeRef(e.from)} before ${nodeRef(e.to)}` +
                 (e.edge.needsRelease
                   ? ', release-gated, which is satisfied by a published release and not by a merge'
-                  : '')
+                  : '') +
+                (e.edge.satisfied ? ', already met' : '')
             )
             .join('; ') +
           '.'
@@ -657,11 +708,20 @@ export function graphSvg(graph, ids = {}) {
       ? `<text class="elabel" x="${mid}" y="${Math.round((sy + ty) / 2) - 5}"` +
         ` font-size="8.5" text-anchor="middle">GATED</text>`
       : '';
+    // A prerequisite that has already landed is the only reason anything merged
+    // is drawn here, so the arrow leaving it has to SAY it is cleared: a merged
+    // card with an ordinary arrow on it reads as a live blocker. Below the
+    // midpoint, so it never lands on GATED -- an edge can be released and met at
+    // the same time.
+    const met = e.edge.satisfied
+      ? `<text class="elabel met" x="${mid}" y="${Math.round((sy + ty) / 2) + 12}"` +
+        ` font-size="8.5" text-anchor="middle">✓ MET</text>`
+      : '';
     out.push(
       `<g class="edgeg"><title>${esc(edgeTitleText(e))}</title>` +
         `<path class="${cls.join(' ')}" fill="none" stroke="currentColor" stroke-width="1.5"` +
         ` marker-end="url(#dep-arrow)" d="M${sx} ${sy} C ${mid} ${sy}, ${mid} ${ty}, ${tx} ${ty}"/>` +
-        `${gate}</g>`
+        `${gate}${met}</g>`
     );
   }
 
@@ -672,7 +732,12 @@ export function graphSvg(graph, ids = {}) {
       `<rect class="box" x="${n.x}" y="${n.y}" width="${NODE_W}" height="${c.height}" rx="6"` +
         ` fill="none" stroke="currentColor"/>`,
       `<text class="ref" x="${n.x + CARD_PAD_X}" y="${n.y + REF_Y}"` +
-        ` font-size="${REF_SIZE}">${esc(c.ref)}</text>`
+        ` font-size="${REF_SIZE}">${esc(c.ref)}</text>`,
+      // The fill, said in a glyph and a word, pinned to the right edge of the
+      // ref line. No <title> of its own: the card already carries one, and it
+      // names the state in full there.
+      `<text class="st" x="${n.x + NODE_W - CARD_PAD_X}" y="${n.y + REF_Y}"` +
+        ` font-size="${MARK_SIZE}" text-anchor="end">${esc(c.stateText)}</text>`
     ];
     c.lines.forEach((line, i) => {
       inner.push(
@@ -691,7 +756,7 @@ export function graphSvg(graph, ids = {}) {
     // rest of the card is careful not to print.
     const body = n.hidden ? inner.join('') : `<a href="${esc(n.url)}">${inner.join('')}</a>`;
     out.push(
-      `<g class="node ${n.kind === 'own' ? 'own' : 'dep'}">` +
+      `<g class="node ${n.kind === 'own' ? 'own' : 'dep'} ${c.state.cls}">` +
         `<title>${esc(nodeTitleText(n))}</title>${body}</g>`
     );
   }
@@ -713,7 +778,22 @@ export const graphCss = layout => `
 svg.depgraph{display:block;width:${layout.width}px;height:${layout.height}px;max-width:none;
   color:var(--ink2)}
 svg.depgraph .box{stroke:var(--rule);fill:var(--raised)}
-svg.depgraph .node.dep .box{fill:none;stroke-dasharray:4 3}
+/* THE FILL IS THE STATE. One rule per state, naming the same variables the
+   legend swatch names, so the key and the card cannot drift apart. Never colour
+   on its own: .st prints the same thing as a glyph and a word. */
+svg.depgraph .st-open .box{fill:var(--state-open);stroke:var(--state-open-line)}
+svg.depgraph .st-draft .box{fill:var(--state-draft);stroke:var(--state-draft-line)}
+svg.depgraph .st-merged .box{fill:var(--state-merged);stroke:var(--state-merged-line)}
+svg.depgraph .st-closed .box{fill:var(--state-closed);stroke:var(--state-closed-line)}
+svg.depgraph .st-unknown .box{fill:var(--raised);stroke:var(--rule)}
+svg.depgraph .st{font:9.5px ui-sans-serif,system-ui,sans-serif;fill:var(--ink2);letter-spacing:.02em}
+svg.depgraph .st-open .st{fill:var(--state-open-line)}
+svg.depgraph .st-draft .st{fill:var(--state-draft-line)}
+svg.depgraph .st-merged .st{fill:var(--state-merged-line)}
+svg.depgraph .st-closed .st{fill:var(--state-closed-line)}
+/* Not one of the author's own PRs: still filled by its state, but dashed, so
+   "whose PR" and "what state" stay two separate channels. */
+svg.depgraph .node.dep .box{stroke-dasharray:4 3}
 svg.depgraph a{text-decoration:none}
 /* the card: the ref identifies it, the TITLE is what it is */
 svg.depgraph .ref{font:600 10.5px ui-monospace,SFMono-Regular,Menlo,monospace;fill:var(--ink2)}
@@ -725,6 +805,10 @@ svg.depgraph .mark.m-critical{fill:var(--critical-ink);font-weight:700}
 svg.depgraph .mark.m-foreign{fill:var(--ink2);font-weight:600}
 svg.depgraph .edge{stroke:var(--ink2)}
 svg.depgraph .edge.cross{stroke-dasharray:5 4}
+/* An arrow whose tail has already landed. Lighter, and labelled -- the label is
+   the part that carries it, since a lighter grey is a difference a reader has to
+   notice rather than one they can read. */
+svg.depgraph .edge.met{stroke:var(--muted)}
 svg.depgraph .ahead{fill:var(--ink2)}
 /* the column header: rank name, what it waits for, and how many PRs stand under
    it with no order between them */
@@ -736,9 +820,25 @@ svg.depgraph .rkrule{stroke:var(--rule)}
 svg.depgraph .elabel{font:700 8.5px ui-sans-serif,system-ui,sans-serif;letter-spacing:.06em;
   fill:var(--serious-ink);paint-order:stroke;stroke:var(--surface);
   stroke-width:3px;stroke-linejoin:round}
+svg.depgraph .elabel.met{fill:var(--good-ink)}
 .legend{margin:10px 0 0;font-size:11px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
 .legend span{white-space:nowrap}
 .legend .k{font-family:ui-monospace,monospace;color:var(--ink2)}
 .legend .k.crit{color:var(--critical-ink);font-weight:700}
 .legend .k.gate{color:var(--serious-ink);font-weight:700;letter-spacing:.06em}
+.legend .k.met{color:var(--good-ink);font-weight:700;letter-spacing:.06em}
+/* The card-fill key. The swatch shows the fill AND the glyph that goes with it,
+   so the entry still reads as three different things in greyscale. Not scoped to
+   the legend: the banner uses the same swatch, and one rule keeps them equal. */
+.sw{display:inline-flex;align-items:center;justify-content:center;width:20px;height:13px;
+  border:1px solid var(--rule);border-radius:3px;background:var(--raised);color:var(--ink2);
+  font:9px ui-monospace,SFMono-Regular,Menlo,monospace;margin-right:5px;vertical-align:-2px}
+.sw.st-open{background:var(--state-open);border-color:var(--state-open-line);
+  color:var(--state-open-line)}
+.sw.st-draft{background:var(--state-draft);border-color:var(--state-draft-line);
+  color:var(--state-draft-line)}
+.sw.st-merged{background:var(--state-merged);border-color:var(--state-merged-line);
+  color:var(--state-merged-line)}
+.sw.st-closed{background:var(--state-closed);border-color:var(--state-closed-line);
+  color:var(--state-closed-line)}
 `;
