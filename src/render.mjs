@@ -48,10 +48,16 @@ function depLine(d) {
   const extra = d.latestRelease
     ? ` <span class="dim">(latest release ${esc(d.latestRelease.tag)} predates the merge)</span>`
     : '';
+  // Somebody else's PR is on this page only because this one depends on it.
+  // Say so on the line, so it is never read as part of the author's own stack.
+  const whose = d.foreign
+    ? ` <span class="badge foreign"><span class="g">◇</span>not yours · @${esc(d.author)}</span>`
+    : '';
+  const hidden = d.hidden ? ' <span class="dim">(private repo — details withheld)</span>' : '';
   return `<li class="dep">
       <span class="badge ${role}"><span class="g">${glyph}</span>${kindLabel}</span>
-      <a href="${esc(d.url)}">${esc(ref)}</a>${gate}
-      <span class="status">${esc(d.status)}</span>${title}${reason}${extra}
+      <a href="${esc(d.url)}">${esc(ref)}</a>${gate}${whose}
+      <span class="status">${esc(d.status)}</span>${title}${hidden}${reason}${extra}
     </li>`;
 }
 
@@ -98,11 +104,25 @@ export function render({ groups, author, org, generatedAt, withheld, total }) {
     )
     .join('');
 
-  const withheldNote = withheld.length
-    ? `<p class="withheld"><strong>${withheld.length} PR${withheld.length > 1 ? 's' : ''} withheld.</strong>
-       ${withheld.length > 1 ? 'They live' : 'It lives'} in a private repo, and this page is served publicly,
-       so ${withheld.length > 1 ? 'they are' : 'it is'} not rendered here.
-       Set <code>INCLUDE_PRIVATE=true</code> on a private build to see ${withheld.length > 1 ? 'them' : 'it'}.
+  // The notice counts only PRs this page would otherwise have drawn, so it
+  // measures what privacy is hiding and nothing else. It also says whether any
+  // of them blocks something visible, because a withheld PR that blocks
+  // nothing above costs the tree a separate root, not a broken chain.
+  const n = withheld.count;
+  const many = n > 1;
+  const withheldNote = n
+    ? `<p class="withheld"><strong>${n} PR${many ? 's' : ''} withheld.</strong>
+       ${many ? `They are ${esc(author)}'s own and live in private repos` : `It is ${esc(author)}'s own and lives in a private repo`},
+       and this page is served publicly, so ${many ? 'they are' : 'it is'} not rendered here.
+       ${
+         withheld.blocking
+           ? `<strong>${withheld.blocking}</strong> of ${many ? 'them' : 'it'} block${withheld.blocking > 1 ? '' : 's'}
+              a PR shown above — that edge is drawn on the blocked PR, but its target is not rendered.`
+           : `${n === 2 ? 'Neither' : many ? 'None of them' : 'It'} blocks anything shown above, so no edge is
+              missing from the tree: withholding ${many ? 'them' : 'it'} costs the page
+              ${n} standalone root${many ? 's' : ''}, not a broken chain.`
+       }
+       Set <code>INCLUDE_PRIVATE=true</code> on a private build to see ${many ? 'them' : 'it'}.
        This page does not pretend the work does not exist.</p>`
     : '';
 
@@ -155,6 +175,7 @@ ul.tree ul.tree>li::before{content:"";position:absolute;left:-18px;top:18px;
 .badge.good{color:var(--good-ink)} .badge.warning{color:var(--warning-ink)}
 .badge.serious{color:var(--serious-ink)} .badge.critical{color:var(--critical-ink)}
 .badge.muted{color:var(--muted)}
+.badge.foreign{color:var(--ink2);border-style:dashed;background:var(--surface)}
 .dim{color:var(--muted);font-size:12px;font-weight:400}
 ul.deps{list-style:none;margin:6px 0 0;padding:6px 0 0;border-top:1px dashed var(--rule);font-size:12px}
 ul.deps li{margin:3px 0;display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
@@ -195,6 +216,12 @@ Depends on #504 — reason shown on this page</pre>
     is published <em>after</em> the PR merged.</li>
 <li>A trailing <code>—</code>, <code>-</code> or <code>:</code> adds a reason, rendered next to the edge.</li>
 </ul>
+<p><strong>Whose PRs appear here.</strong> Every node of every tree is a PR by
+<code>${esc(author)}</code>; a root is never anybody else's. Somebody else's PR is drawn only when one of
+these depends on it, as a dependency on the blocked PR marked
+<span class="badge foreign"><span class="g">◇</span>not yours · @handle</span> — never as a node, never as a
+root. Dropping it instead would hide why the PR above it cannot merge. A PR by another author that
+nothing here depends on is not drawn at all.</p>
 <p>Parsing rules, so prose never becomes an edge: the line must <strong>start</strong> with
 <code>Depends on</code> (a leading <code>-</code> bullet is fine); lines inside fenced code blocks are
 ignored; and <strong>blockquoted lines are ignored</strong>, so quoting another PR body — or a

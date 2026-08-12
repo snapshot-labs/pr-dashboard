@@ -14,6 +14,22 @@ Netlify credential was available to the account that built this. GitHub Pages is
 meantime so the page is actually usable; adding the two secrets switches Netlify on with no code
 change, and Pages can then be turned off or left as a mirror.
 
+## Whose PRs are on it
+
+**Every node of every tree is a PR by `PR_AUTHOR`. A root is never anybody else's.**
+
+Somebody else's PR earns a place in exactly one way: one of yours depends on it. Then it is drawn
+as a **dependency on your blocked PR**, labelled `◇ not yours · @handle`, and never as a node or a
+root of its own. A PR by another author that nothing of yours points at is not drawn at all.
+
+The reason it is not simply filtered out: `sx-monorepo#2222` is branched off `#2219`, which is
+wa0x6e's. Dropping `#2219` would hide why `#2222` cannot merge, so it stays — as an edge, marked.
+
+Merge order runs root-first, so a dependency is a *parent*. That is exactly why another author's
+PR cannot be a tree node at all: as a dependency of yours it would sit above yours, which makes it
+a root, which is the thing being ruled out. `buildGroups()` therefore drops every non-`PR_AUTHOR`
+PR before laying out the forest, and reports what it dropped on `groups.pruned`.
+
 ## Declaring a dependency
 
 The syntax is documented **on the page itself** (top of the dashboard), which is the copy that
@@ -48,7 +64,7 @@ deliberately says "base is red too" and not "this PR is fine".
 
 ```sh
 GH_TOKEN=$(gh auth token) node build.mjs   # writes dist/index.html
-GH_TOKEN=$(gh auth token) node test.mjs    # 20 tests
+GH_TOKEN=$(gh auth token) node test.mjs    # 33 tests
 python3 -m http.server -d dist             # look at it
 ```
 
@@ -64,6 +80,17 @@ python3 -m http.server -d dist             # look at it
 Two of the repos in scope (`laser`, `nickai-app-fork`) are private, and the built page is served
 publicly. By default those PRs are **withheld**, and the page says so, with a count — it does not
 quietly drop them. Set `INCLUDE_PRIVATE=true` only for a build that is not public.
+
+The count measures what privacy is hiding and nothing else, so it counts only PRs the page **would
+otherwise have drawn**: yours, plus anybody's that something visible depends on. A private PR that
+the roots-are-mine rule would prune anyway is not counted as withheld — calling it withheld would
+overstate the loss. The notice also says how many of them block a PR shown on the page, because a
+withheld PR that blocks nothing costs the tree a separate root rather than a broken chain. Today
+that is **2 withheld, 0 blocking**.
+
+The page never names the private repos. The dependency renderer applies the same rule: a
+dependency whose target lives in a private repo keeps its number and link but drops its title and
+author on a public build.
 
 ## Tokens
 

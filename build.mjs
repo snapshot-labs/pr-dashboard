@@ -24,6 +24,39 @@ const ORG = process.env.PR_ORG || 'snapshot-labs';
 // pretends the work does not exist.
 const INCLUDE_PRIVATE = process.env.INCLUDE_PRIVATE === 'true';
 
+// The tree roots on MY PRs only.
+//
+// Somebody else's PR earns a place on this page in exactly one way: one of
+// mine depends on it. Then it is drawn as a dependency hanging off my PR and
+// labelled with its author, so it never reads as my work. It is never a root,
+// never the top of a subtree of its own, and if nothing of mine points at it
+// it is not fetched or drawn at all.
+//
+// Today that rule bites once: sx-monorepo#2222 (mine) is branched off #2219
+// (wa0x6e's). Dropping #2219 would hide why #2222 cannot merge, so it stays --
+// as a dependency, marked, not as a root.
+export const isMineFor = author => login =>
+  String(login || '').toLowerCase() === String(author).toLowerCase();
+const isMine = isMineFor(AUTHOR);
+
+// Flags a dependency edge so the page can say whose PR the target is.
+//
+// Unknown authorship (an unreadable target) is NOT reported as "another
+// author" -- we do not know, and guessing reads as an accusation. A target in
+// a private repo keeps its number and link but loses its title and author on a
+// public build, because a dependency is no reason to leak private work.
+export function decorateEdge(edge, mine, includePrivate) {
+  const known = Boolean(edge.author);
+  edge.foreign = known && !mine(edge.author);
+  if (edge.targetPrivate && !includePrivate) {
+    edge.title = null;
+    edge.author = null;
+    edge.hidden = true;
+  }
+  return edge;
+}
+const markAuthor = edge => decorateEdge(edge, isMine, INCLUDE_PRIVATE);
+
 async function main() {
   const found = await searchOpenPrs(AUTHOR, ORG);
   console.log(`search: ${found.length} open PRs by ${AUTHOR} in ${ORG}`);
@@ -50,6 +83,7 @@ async function main() {
       number: full.number,
       title: full.title,
       url: full.html_url,
+      author: full.user.login,
       draft: full.draft,
       head: full.head.ref,
       headSha: full.head.sha,
@@ -63,18 +97,26 @@ async function main() {
   }
   prs.sort((a, b) => a.repo.localeCompare(b.repo) || a.number - b.number);
 
-  const withheld = prs.filter(p => p.private && !INCLUDE_PRIVATE);
-  const visible = INCLUDE_PRIVATE ? prs : prs.filter(p => !p.private);
+  // The search is already scoped to author:AUTHOR, so this drops nothing
+  // today. It is here so the "roots are mine" rule survives a widened query
+  // rather than depending on one word in a search string.
+  const foreign = prs.filter(p => !isMine(p.author));
+  if (foreign.length) {
+    console.log(`dropped ${foreign.length} PR(s) not authored by ${AUTHOR} from the root set`);
+  }
+  const own = prs.filter(p => isMine(p.author));
+
+  const withheldAll = own.filter(p => p.private && !INCLUDE_PRIVATE);
+  const visible = INCLUDE_PRIVATE ? own : own.filter(p => !p.private);
 
   // --- edges ------------------------------------------------------------
-  const byKey = new Map(visible.map(p => [`${p.repo}#${p.number}`, p]));
-
   for (const pr of visible) {
     pr.deps = [];
 
     // 1. explicit stack: base branch is another OPEN PR's head branch.
     //    Any author -- a stack can sit on a colleague's branch (sx#2222 sits
-    //    on wa0x6e's #2219).
+    //    on wa0x6e's #2219). A colleague's PR reached this way is a dependency
+    //    of mine and is drawn as one; it is not promoted to a node of the tree.
     //
     //    Two guards, because the naive name match is badly wrong. A PR opened
     //    FROM A FORK's default branch has head.ref === "master", which matches
@@ -95,19 +137,22 @@ async function main() {
               s.head.repo.full_name === pr.baseRepo
           );
     if (basePr) {
-      pr.deps.push({
-        kind: 'stack',
-        repo: pr.repo,
-        number: basePr.number,
-        url: basePr.html_url,
-        title: basePr.title,
-        author: basePr.user.login,
-        crossRepo: false,
-        needsRelease: false,
-        reason: `branched from ${pr.base}`,
-        satisfied: false,
-        status: 'open'
-      });
+      pr.deps.push(
+        markAuthor({
+          kind: 'stack',
+          repo: pr.repo,
+          number: basePr.number,
+          url: basePr.html_url,
+          title: basePr.title,
+          author: basePr.user.login,
+          targetPrivate: Boolean(basePr.base && basePr.base.repo && basePr.base.repo.private),
+          crossRepo: false,
+          needsRelease: false,
+          reason: `branched from ${pr.base}`,
+          satisfied: false,
+          status: 'open'
+        })
+      );
     }
 
     // 2 + 3. declared edges, same-repo and cross-repo.
@@ -121,6 +166,7 @@ async function main() {
         url: target ? target.html_url : `https://github.com/${d.repo}/pull/${d.number}`,
         title: target ? target.title : null,
         author: target ? target.user.login : null,
+        targetPrivate: Boolean(target && target.base && target.base.repo && target.base.repo.private),
         crossRepo: d.crossRepo,
         needsRelease: d.needsRelease,
         reason: d.reason,
@@ -128,7 +174,7 @@ async function main() {
         unreadable: !target
       };
       Object.assign(edge, await resolveStatus(edge, target));
-      pr.deps.push(edge);
+      pr.deps.push(markAuthor(edge));
     }
   }
 
@@ -142,7 +188,11 @@ async function main() {
     pr.ci.baseSha = baseSha ? baseSha.slice(0, 7) : null;
   }
 
-  const groups = buildGroups(visible, byKey);
+  const groups = buildGroups(visible, isMine);
+  const withheld = accountWithheld(withheldAll, visible, isMine);
+  console.log(
+    `withheld: ${withheld.count} (${withheld.blocking} of them block a PR shown on the page)`
+  );
 
   mkdirSync('dist', { recursive: true });
   const html = render({
@@ -150,7 +200,7 @@ async function main() {
     author: AUTHOR,
     org: ORG,
     generatedAt: new Date().toISOString(),
-    withheld: withheld.map(p => p.repo),
+    withheld,
     total: visible.length
   });
   writeFileSync('dist/index.html', html);
@@ -181,10 +231,50 @@ export async function resolveStatus(edge, target) {
   };
 }
 
+// What the "N PRs withheld" notice is allowed to count.
+//
+// The notice exists to admit the page is incomplete, so it must count only PRs
+// the page would otherwise have DRAWN. Under the roots-are-mine rule that is:
+// my own PRs (each is a root of its own), plus anybody's PR that something
+// visible depends on (drawn as a dependency). A PR that is neither is missing
+// from the tree for reasons that have nothing to do with privacy, and counting
+// it as "withheld" would overstate what privacy is hiding.
+export function accountWithheld(withheldPrs, visible, mine) {
+  const referenced = new Set();
+  const blockers = new Set();
+  for (const pr of visible) {
+    for (const d of pr.deps || []) {
+      const key = `${d.repo}#${d.number}`;
+      referenced.add(key);
+      if (!d.satisfied) blockers.add(key);
+    }
+  }
+
+  const key = p => `${p.repo}#${p.number}`;
+  const counted = withheldPrs.filter(p => mine(p.author) || referenced.has(key(p)));
+  return {
+    count: counted.length,
+    referenced: counted.filter(p => referenced.has(key(p))).length,
+    blocking: counted.filter(p => blockers.has(key(p))).length
+  };
+}
+
 // Group by repo and lay each repo out as a forest ordered by merge order.
-function buildGroups(prs, byKey) {
+//
+// Merge order runs root-first: a node's parent is the thing that has to land
+// before it. That is exactly why somebody else's PR cannot be a tree node --
+// as a dependency of mine it would have to sit ABOVE mine, which makes it a
+// root, which is the thing being ruled out. So a foreign PR stays an edge
+// drawn on my node (see decorateEdge) and never enters the forest.
+export function buildGroups(prs, mine) {
+  // Step one, before anything else is computed: the forest is built out of my
+  // PRs only. A foreign PR here has nothing of mine hanging off it (if it did,
+  // that would be an edge on my node, not a node of its own), so it is pruned.
+  const pruned = prs.filter(p => !mine(p.author)).map(p => `${p.repo}#${p.number}`);
+
   const byRepo = new Map();
   for (const pr of prs) {
+    if (!mine(pr.author)) continue;
     if (!byRepo.has(pr.repo)) byRepo.set(pr.repo, []);
     byRepo.get(pr.repo).push(pr);
   }
@@ -195,8 +285,11 @@ function buildGroups(prs, byKey) {
 
     for (const pr of list) {
       // In-repo, unsatisfied edges to a PR that is also on this page become
-      // tree edges. Everything else stays an annotation on the node.
-      pr.parents = pr.deps
+      // tree edges. Everything else stays an annotation on the node -- which
+      // is where a dependency on somebody else's PR lands, because `local`
+      // holds none of theirs. sx#2222's edge to wa0x6e's #2219 goes down this
+      // path: not a tree edge, still rendered, still explains the block.
+      pr.parents = (pr.deps || [])
         .filter(d => !d.crossRepo && d.repo === repo && local.has(d.number) && !d.satisfied)
         .map(d => d.number);
       pr.children = [];
@@ -216,6 +309,7 @@ function buildGroups(prs, byKey) {
       }
     }
 
+    // Every remaining node is mine, so every root is mine.
     const roots = list.filter(p => !placed.has(p.number)).map(p => p.number);
     groups.push({
       repo,
@@ -224,6 +318,7 @@ function buildGroups(prs, byKey) {
       count: list.length
     });
   }
+  groups.pruned = pruned;
   return groups;
 }
 

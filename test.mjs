@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { parseDeclarations } from './src/declarations.mjs';
 import { classify } from './src/ci.mjs';
-import { resolveStatus } from './build.mjs';
+import { accountWithheld, buildGroups, decorateEdge, isMineFor, resolveStatus } from './build.mjs';
 import { getPr } from './src/github.mjs';
 
 let pass = 0;
@@ -82,6 +82,98 @@ await t('all green -> green', () => {
 });
 await t('still running -> pending', () => {
   assert.equal(classify([{ name: 'Test', status: 'in_progress' }], []).state, 'pending');
+});
+
+console.log('roots are mine');
+const mine = isMineFor('tony8713');
+const pr = (number, author, deps = []) => ({
+  repo: 'snapshot-labs/sx-monorepo',
+  number,
+  author,
+  deps: deps.map(d => ({
+    repo: 'snapshot-labs/sx-monorepo',
+    number: d,
+    crossRepo: false,
+    satisfied: false
+  }))
+});
+
+await t('a PR by another author is never a root', () => {
+  // The shape of today's data: #2222 is mine and sits on wa0x6e's #2219.
+  const g = buildGroups([pr(2222, 'tony8713', [2219]), pr(2219, 'wa0x6e')], mine);
+  assert.deepEqual(g[0].roots, [2222]);
+  assert.deepEqual(g.pruned, ['snapshot-labs/sx-monorepo#2219']);
+});
+await t('...and it is not a node either, so it cannot head a subtree', () => {
+  const g = buildGroups([pr(2222, 'tony8713', [2219]), pr(2219, 'wa0x6e')], mine);
+  assert.equal(g[0].nodes.has(2219), false);
+  assert.equal(g[0].count, 1);
+});
+await t('the dependency on it survives -- it is not filtered away', () => {
+  const p = pr(2222, 'tony8713', [2219]);
+  buildGroups([p, pr(2219, 'wa0x6e')], mine);
+  assert.equal(p.deps.length, 1);
+  assert.equal(p.deps[0].number, 2219);
+});
+await t('a foreign PR nothing of mine depends on is pruned entirely', () => {
+  const g = buildGroups([pr(1, 'tony8713'), pr(999, 'someone-else')], mine);
+  assert.deepEqual(g[0].roots, [1]);
+  assert.deepEqual(g.pruned, ['snapshot-labs/sx-monorepo#999']);
+});
+await t('my own stack still nests: #491 under #504', () => {
+  const stamp = n => ({ ...pr(n, 'tony8713'), repo: 'snapshot-labs/stamp' });
+  const p491 = { ...stamp(491), deps: [{ repo: 'snapshot-labs/stamp', number: 504, crossRepo: false, satisfied: false }] };
+  const g = buildGroups([p491, stamp(504), stamp(457)], mine);
+  assert.deepEqual(g[0].roots, [457, 504]);
+  assert.deepEqual(g[0].nodes.get(504).children, [491]);
+});
+await t('case-insensitive author match', () => {
+  assert.equal(isMineFor('tony8713')('Tony8713'), true);
+  assert.equal(isMineFor('tony8713')(null), false);
+});
+
+console.log('edge authorship marking');
+await t('another author is flagged foreign', () => {
+  assert.equal(decorateEdge({ author: 'wa0x6e' }, mine, false).foreign, true);
+});
+await t('my own PR is not flagged foreign', () => {
+  assert.equal(decorateEdge({ author: 'tony8713' }, mine, false).foreign, false);
+});
+await t('NEGATIVE: an unreadable target is not accused of being someone else', () => {
+  assert.equal(decorateEdge({ author: null }, mine, false).foreign, false);
+});
+await t('a private target keeps its link but loses title and author', () => {
+  const e = decorateEdge({ author: 'wa0x6e', title: 'secret', targetPrivate: true }, mine, false);
+  assert.equal(e.title, null);
+  assert.equal(e.author, null);
+  assert.equal(e.hidden, true);
+});
+
+console.log('withheld accounting');
+const wh = (repo, number, author) => ({ repo, number, author, private: true });
+await t('withheld PRs of mine are counted, and none blocks anything', () => {
+  const r = accountWithheld(
+    [wh('snapshot-labs/laser', 86, 'tony8713'), wh('snapshot-labs/nickai-app-fork', 8, 'tony8713')],
+    [pr(2222, 'tony8713', [2219])],
+    mine
+  );
+  assert.deepEqual([r.count, r.referenced, r.blocking], [2, 0, 0]);
+});
+await t('a withheld PR that blocks a visible one is counted as blocking', () => {
+  const dependent = {
+    repo: 'snapshot-labs/stamp',
+    number: 491,
+    author: 'tony8713',
+    deps: [{ repo: 'snapshot-labs/laser', number: 86, crossRepo: true, satisfied: false }]
+  };
+  const r = accountWithheld([wh('snapshot-labs/laser', 86, 'tony8713')], [dependent], mine);
+  assert.deepEqual([r.count, r.referenced, r.blocking], [1, 1, 1]);
+});
+await t('a withheld PR by another author that nothing depends on is NOT counted', () => {
+  // It would not be rendered even if the repo were public, so calling it
+  // "withheld" would overstate what privacy is hiding.
+  const r = accountWithheld([wh('snapshot-labs/laser', 90, 'someone-else')], [pr(1, 'tony8713')], mine);
+  assert.equal(r.count, 0);
 });
 
 if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) {
