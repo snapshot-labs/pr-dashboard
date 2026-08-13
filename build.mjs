@@ -199,9 +199,18 @@ export async function resolveDeps(pr, repoMeta) {
   if (pr.hidden) return pr.deps; // see redactPrivate()
 
   // 1. explicit stack: base branch is another OPEN PR's head branch.
-  //    Any author -- a stack can sit on a colleague's branch (sx#2222 sits on
-  //    wa0x6e's #2219), and under the component rule a colleague's PR reached
-  //    this way is a full node with prerequisites of its own.
+  //    Any author -- a stack can sit on a colleague's branch (sx#2222 sat on
+  //    wa0x6e's #2219 until that merged), and under the component rule a
+  //    colleague's PR reached this way is a full node with prerequisites of its
+  //    own.
+  //
+  //    OPEN is the whole limitation of this source, and it is not a soft one.
+  //    GitHub retargets a child onto the default branch within seconds of its
+  //    parent merging, so the base ref does not go stale, it is overwritten --
+  //    #2222's base is `master` now and nothing about #2219 survives in it. That
+  //    is why a stack is worth DECLARING in the body as well: the declaration is
+  //    what the merged-trail rule reads, and it is the only reason #2219 is
+  //    still drawn. See src/declarations.mjs.
   //
   //    Two guards, because the naive name match is badly wrong. A PR opened
   //    FROM A FORK's default branch has head.ref === "master", which matches
@@ -245,6 +254,14 @@ export async function resolveDeps(pr, repoMeta) {
   }
 
   // 2 + 3. declared edges, same-repo and cross-repo.
+  //
+  // A well-formed stacked PR now hits BOTH sources: its base ref says it and its
+  // body says it. One pair is one edge, so the declaration is skipped when the
+  // computed stack already covers that target -- the stack edge wins, and with
+  // it the `branched from <branch>` reason, which is the more precise of the two
+  // (it names the branch git is actually pointing at). Once the parent merges
+  // the computed edge is gone and the declaration is all there is, which is the
+  // handover this dedup is quietly performing.
   for (const d of parseDeclarations(pr.body, pr.repo)) {
     if (pr.deps.some(e => e.repo === d.repo && e.number === d.number)) continue;
     pr.deps.push(markAuthor(await declaredEdge(d)));

@@ -13,6 +13,7 @@ import {
   groupNodes,
   isMineFor,
   mergedNonPrerequisites,
+  prRecord,
   redactPrivate,
   resolveDeps,
   resolveStatus
@@ -89,6 +90,78 @@ await t('dedupe keeps the release-gated variant', () => {
   const d = parseDeclarations('Depends on o/r#1\nDepends on release of o/r#1', 'o/r');
   assert.equal(d.length, 1);
   assert.equal(d[0].needsRelease, true);
+});
+
+// The spellings people actually write on a stacked PR. `Depends on` was the only
+// one this understood, and the cost was not cosmetic: the computed stack edge
+// dies the instant the parent merges (GitHub retargets the child), so a stack
+// that was never declared in words leaves the page at the moment it lands.
+console.log('the stack spellings declare what "depends on" declares');
+await t('"Stacked on" is a declaration', () => {
+  const [d] = parseDeclarations('Stacked on #2219', 'o/r');
+  assert.deepEqual([d.repo, d.number, d.stacked, d.crossRepo], ['o/r', 2219, true, false]);
+});
+await t('"On top of" is a declaration', () => {
+  const [d] = parseDeclarations('On top of #2188', 'o/r');
+  assert.deepEqual([d.repo, d.number, d.stacked], ['o/r', 2188, true]);
+});
+await t('"Stacked on top of" with the branch in parentheses', () => {
+  const [d] = parseDeclarations(
+    'Stacked on top of #2188 (`feat/safesnap-execution`) — review/merge that first.',
+    'o/r'
+  );
+  assert.equal(d.number, 2188);
+  assert.equal(d.branch, 'feat/safesnap-execution', 'the backticks are markdown, not the ref');
+});
+await t('the stack spellings take the cross-repo and release-gated forms too', () => {
+  const [d] = parseDeclarations('Stacked on release of snapshot-labs/snapshot.js#1225', 'o/r');
+  assert.deepEqual([d.repo, d.crossRepo, d.needsRelease], [
+    'snapshot-labs/snapshot.js', true, true
+  ]);
+});
+await t('lowercase and a bullet are both fine', () => {
+  assert.equal(parseDeclarations('- stacked on #7', 'o/r').length, 1);
+});
+await t('the instruction after a stack spelling is NOT the arrow label', () => {
+  const [d] = parseDeclarations('Stacked on #2219 — retarget to `master` after it merges.', 'o/r');
+  assert.equal(d.reason, null, 'that is advice to the author, and it expires when #2219 merges');
+  assert.match(d.raw, /retarget to/, 'and the line is still carried verbatim');
+});
+await t('the branch is the arrow label instead, matching the computed edge', () => {
+  const [d] = parseDeclarations('Stacked on top of #2188 (`feat/safesnap-execution`) — x', 'o/r');
+  assert.equal(d.reason, 'stacked on feat/safesnap-execution');
+});
+await t('a parenthetical that cannot be a branch is not used as one', () => {
+  const [d] = parseDeclarations('Stacked on #123 (the schema PR) — x', 'o/r');
+  assert.equal(d.branch, null, 'a git ref cannot hold a space');
+  assert.equal(d.reason, null);
+});
+await t('"Depends on" keeps its reason, and a parenthetical does not eat it', () => {
+  const [d] = parseDeclarations('Depends on #504 (`some-branch`) — because reasons', 'o/r');
+  assert.equal(d.reason, 'because reasons');
+  assert.equal(d.stacked, false);
+});
+await t('NEGATIVE: a stack spelling in a blockquote declares nothing', () => {
+  assert.deepEqual(parseDeclarations('> Stacked on #2219 — retarget later', 'o/r'), []);
+});
+await t('NEGATIVE: a stack spelling in fenced code declares nothing', () => {
+  assert.deepEqual(parseDeclarations('```\nStacked on top of #2188\n```', 'o/r'), []);
+  assert.deepEqual(parseDeclarations('~~~\nOn top of #2188\n~~~', 'o/r'), []);
+});
+await t('NEGATIVE: mid-sentence stack prose declares nothing', () => {
+  assert.deepEqual(parseDeclarations('This one sits on top of #2188 for now.', 'o/r'), []);
+});
+await t('NEGATIVE: a line that carries on past the number declares nothing', () => {
+  // sx-monorepo#2218 opens with exactly this shape.
+  assert.deepEqual(
+    parseDeclarations('Together with #2219, this will allow a simpler PR on #2099', 'o/r'),
+    []
+  );
+  assert.deepEqual(parseDeclarations('Stacked on #1 and #2', 'o/r'), []);
+});
+await t('one target declared twice, in two spellings, is one declaration', () => {
+  const d = parseDeclarations('Stacked on o/r#1\nDepends on o/r#1 — and again', 'o/r');
+  assert.equal(d.length, 1);
 });
 
 console.log('CI attribution');
@@ -1956,6 +2029,109 @@ await t('dark mode is re-themed, not the light wash left to fend for itself', ()
   for (const s of ['open', 'draft', 'merged', 'closed']) {
     assert.notEqual(l[s], d[s], `${s} has its own dark fill`);
   }
+});
+
+// --- the two edge sources, against a fake GitHub -------------------------
+//
+// A stacked PR now says in words what its base ref already says, so both edge
+// sources speak about the same pair and the build has to emit ONE edge. Then the
+// parent merges, GitHub retargets the child onto master, and the base ref is
+// gone -- so the declaration is the only thing left, and the same pair has to
+// keep drawing. The second case cannot be built out of open PRs at all, which is
+// why this stubs the API rather than reaching for one.
+console.log('a declared stack and a computed one are one edge');
+
+const respond = data => ({
+  ok: true,
+  status: 200,
+  headers: { get: () => null },
+  json: async () => data
+});
+const missing = { ok: false, status: 404, headers: { get: () => null } };
+const withFakeGitHub = async (open, byNumber, fn) => {
+  const real = globalThis.fetch;
+  globalThis.fetch = async url => {
+    const u = String(url);
+    const one = u.match(/\/pulls\/(\d+)(?:\?|$)/);
+    if (one) return byNumber[one[1]] ? respond(byNumber[one[1]]) : missing;
+    if (/\/pulls\?state=open/.test(u)) return respond(/page=1(?:&|$)/.test(u) ? open : []);
+    throw new Error(`the fake GitHub was asked for something it does not serve: ${u}`);
+  };
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = real;
+  }
+};
+const pull = (repo, number, over = {}) => ({
+  number,
+  title: `pr ${number}`,
+  html_url: `https://github.com/${repo}/pull/${number}`,
+  user: { login: 'wa0x6e' },
+  draft: false,
+  state: 'open',
+  merged_at: null,
+  body: '',
+  head: { ref: `feat/branch-${number}`, sha: `sha-${number}`, repo: { full_name: repo } },
+  base: { ref: 'master', repo: { full_name: repo, private: false } },
+  ...over
+});
+const openRepo = name => new Map([[name, { name, private: false, defaultBranch: 'master' }]]);
+
+await t('declared AND computed on the same pair is one edge, and the stack wins', async () => {
+  const R = 'fake/both-sources';
+  const parent = pull(R, 10, { head: { ref: 'feat/parent', sha: 's10', repo: { full_name: R } } });
+  const child = pull(R, 11, {
+    user: { login: 'tony8713' }, // mine, so the component rule keeps the chain
+    base: { ref: 'feat/parent', repo: { full_name: R, private: false } },
+    body: 'Stacked on top of #10 (`feat/parent`) — review/merge that first.'
+  });
+  const rec = prRecord(child, R, { private: false });
+  await withFakeGitHub([parent, child], { 10: parent, 11: child }, () =>
+    resolveDeps(rec, openRepo(R))
+  );
+  assert.equal(rec.deps.length, 1, 'one pair, one edge');
+  assert.equal(rec.deps[0].number, 10);
+  assert.equal(rec.deps[0].kind, 'stack');
+  assert.equal(rec.deps[0].reason, 'branched from feat/parent', 'the computed reason is kept');
+  assert.equal(buildGraph([rec], mine).edges.length, 1, 'and it is drawn once');
+});
+
+await t('once the parent merges the declaration alone still draws the edge', async () => {
+  // sx-monorepo#2222 -> #2219, to the letter: #2219 merged, GitHub retargeted
+  // #2222 onto master within seconds, so the base ref no longer says anything
+  // and #2219 is not in the open listing either. The body is all that is left.
+  const R = 'fake/parent-merged';
+  const parent = pull(R, 20, {
+    state: 'closed',
+    merged_at: '2026-08-12T09:00:00Z',
+    head: { ref: 'feat/landed', sha: 's20', repo: { full_name: R } }
+  });
+  const child = pull(R, 21, {
+    user: { login: 'tony8713' }, // mine; #20 is a colleague's, exactly as #2219 is
+    body: 'Stacked on #20 — retarget to `master` after it merges.'
+  });
+  const rec = prRecord(child, R, { private: false });
+  await withFakeGitHub([child], { 20: parent, 21: child }, () => resolveDeps(rec, openRepo(R)));
+
+  assert.equal(rec.deps.length, 1, 'the edge survives its prerequisite merging');
+  const [dep] = rec.deps;
+  assert.equal(dep.kind, 'implicit', 'declared, because there is no base ref left to compute from');
+  assert.equal(dep.title, 'pr 20', 'resolved by number, so it is not a bare number');
+  assert.equal(dep.merged, true);
+  assert.equal(dep.satisfied, true);
+  assert.equal(dep.status, 'merged');
+  assert.equal(dep.targetState, 'merged');
+  assert.equal(dep.reason, null, 'and it is not labelled with advice that has expired');
+
+  const g = buildGraph([rec], mine);
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  assert.equal(at(g, `${R}#20`).merged, true, 'the merged prerequisite is a card');
+  assert.equal(at(g, `${R}#20`).state, 'merged');
+  assert.equal(g.edges.length, 1);
+  assert.match(html, /already merged — drawn because something here still depends on it/);
+  assert.match(html, /<path class="edge[^"]*met"/, 'and its arrow is drawn met');
 });
 
 if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) {

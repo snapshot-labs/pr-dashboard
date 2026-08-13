@@ -293,21 +293,40 @@ ${withheldNote}
 <details class="fold">
 <summary>Declaring a prerequisite (the syntax this page reads)</summary>
 <p>Explicit stacks — a PR whose base branch is another open PR's head — are computed from the
-GitHub API and are always correct, so they need no declaration. The other two kinds GitHub
-cannot see, so you write them in the <strong>PR body</strong> of the PR that is blocked, and they
-become an arrow <em>into</em> its card here:</p>
+GitHub API and are always correct <em>while the prerequisite is open</em>; declaring one anyway is
+what keeps it drawn after that (see below). The other two kinds GitHub cannot see at all. Either way
+you write it in the <strong>PR body</strong> of the PR that is blocked, and it becomes an arrow
+<em>into</em> its card here:</p>
 <pre>Depends on #504
 Depends on snapshot-labs/snapshot.js#1225
 Depends on release of snapshot-labs/snapshot.js#1225
-Depends on #504 — reason, shown when you hover the arrow</pre>
+Depends on #504 — reason, shown when you hover the arrow
+
+Stacked on #2219
+Stacked on top of #2188 (feat/safesnap-execution)
+On top of #2188</pre>
 <ul>
 <li><code>Depends on #504</code> — same repo. Satisfied once #504 is merged.</li>
 <li><code>Depends on owner/repo#123</code> — cross-repo. Satisfied once it is merged.</li>
 <li><code>Depends on release of owner/repo#123</code> — cross-repo and <em>release-gated</em>.
     Merging is <strong>not</strong> enough: satisfied only once a non-draft release of that repo
     is published <em>after</em> the PR merged. That edge is marked <code>GATED</code>.</li>
-<li>A trailing <code>—</code>, <code>-</code> or <code>:</code> adds a reason.</li>
+<li><code>Stacked on</code>, <code>Stacked on top of</code> and <code>On top of</code> declare the
+    same thing as <code>Depends on</code>, in the words people actually write on a stacked PR. Each
+    takes the same three forms above.</li>
+<li>A trailing <code>—</code>, <code>-</code> or <code>:</code> adds a reason to a
+    <code>Depends on</code> line. On the three stack spellings that tail is <em>not</em> read as a
+    reason — what follows one is, in practice, an instruction to the reader
+    (<em>retarget to master after it merges</em>) rather than a description of the dependency, and it
+    is stale by the time the arrow is drawn. Those arrows are labelled with the branch name instead,
+    when you put one in parentheses after the number.</li>
 </ul>
+<p><strong>Declare the stack even though this page can compute one.</strong> An explicit stack is
+computed by matching a PR's base branch against the head branches of the repo's <em>open</em> PRs, so
+it exists only while the prerequisite is open: GitHub retargets the child onto the default branch
+seconds after the parent merges, and that signal is then gone for good. A merged prerequisite is kept
+on this page when something <em>declares</em> it, so the line in the body is what carries a stack
+across the moment it lands — without it the top of the chain disappears exactly when it merges.</p>
 <p><strong>Whose PRs appear here.</strong> Take the dependency graph and split it into
 <em>connected chains</em> — everything joined by dependency edges, following them in either
 direction. A chain is drawn <strong>in full</strong> if <strong>at least one</strong> PR in it is
@@ -345,11 +364,13 @@ allowed to cancel the other.</p>
 <p>A merged prerequisite is resolved <em>by number</em>, not out of the open-PR listing that explicit
 stacks and the candidate sweep are computed from — that listing cannot see a merged PR at all — so it
 keeps its real title, author and state instead of degrading to a bare number.</p>
-<p>Parsing rules, so prose never becomes an edge: the line must <strong>start</strong> with
-<code>Depends on</code> (a leading <code>-</code> bullet is fine); lines inside fenced code blocks are
+<p>Parsing rules, so prose never becomes an edge: the line must <strong>start</strong> with one of the
+four keywords (a leading <code>-</code> bullet is fine) and must be nothing but the declaration, so
+<em>Together with #2219, this will…</em> declares nothing; lines inside fenced code blocks are
 ignored; and <strong>blockquoted lines are ignored</strong>, so quoting another PR body — or a
 GitHub <code>[!IMPORTANT]</code> callout — never declares anything. Nothing on this page is inferred
-heuristically: an edge exists because somebody wrote it.</p>
+heuristically: an edge exists because somebody wrote it, and which spelling they wrote is the only
+thing that decides how the line is read.</p>
 </details>
 
 <details class="fold">

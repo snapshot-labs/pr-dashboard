@@ -372,18 +372,41 @@ matters — it is where somebody looking at the graph will go. In short, three k
 
 | Kind | Where it comes from |
 |---|---|
-| **Explicit stack** | Computed. A PR whose base branch is another open PR's head. Never declared. |
+| **Explicit stack** | Computed. A PR whose base branch is another open PR's head — but only while that PR is open, so declare it too. |
 | **Implicit, same repo** | `Depends on #504` in the blocked PR's body. |
 | **Cross-repo** | `Depends on owner/repo#123`, or `Depends on release of owner/repo#123`. |
 
 `Depends on release of …` is satisfied only when the target PR is merged **and** a non-draft
 release of that repo was published afterwards — merging alone does not clear it.
 
-A trailing `—`, `-` or `:` adds a reason, which appears in the hover title of the edge it explains.
+**Four keywords, one meaning.** `Depends on`, `Stacked on`, `Stacked on top of` and `On top of` are
+read identically, and each takes all three forms above. `Depends on` was the only spelling the parser
+understood for a while and nobody here writes it; what people write on a stacked PR is
+`Stacked on #2219` or ``Stacked on top of #2188 (`feat/safesnap-execution`)``.
+
+**Declare the stack even though it can be computed.** The computed stack edge matches a base branch
+against the head branches of the repo's *open* PRs, so it survives exactly as long as the
+prerequisite is open — GitHub retargets the child onto the default branch within seconds of the
+parent merging, and the base-ref signal is then destroyed, not merely stale. The merged-trail rule
+keeps a merged prerequisite only when something **declares** it, so the line in the body is the only
+thing that carries a stack across the moment it lands. sx-monorepo#2219 dropped off the page when it
+merged, taking the top of #2222's chain with it, while #2222's body had said `Stacked on #2219` the
+whole time; teaching the parser that spelling is what put it back.
+
+A trailing `—`, `-` or `:` adds a reason to a **`Depends on`** line, which appears in the hover title
+of the edge it explains. On the three stack spellings the tail is dropped instead: what follows one
+is, in practice, an instruction to the reader (*retarget to `master` after it merges*,
+*review/merge that first*) rather than a description of the dependency, and it has expired by the
+time the arrow is finally drawn. The rule is syntactic — decided by the keyword, never by sniffing
+the prose — and the raw line is kept on the parsed declaration either way. Those arrows are labelled
+`stacked on <branch>` when the author wrote a branch in parentheses after the number, which is the
+same thing the computed edge's `branched from <branch>` says, so the label does not change under the
+reader when the parent merges.
 
 **Nothing is inferred.** An edge exists because somebody wrote it. To keep prose from becoming
-an edge, a declaration must start its line (a leading `-` bullet is allowed), and lines inside
-fenced code blocks or blockquotes are ignored — so quoting another PR body, or a GitHub
+an edge, a declaration must start its line (a leading `-` bullet is allowed) and be nothing but the
+declaration — `Together with #2219, this will…` declares nothing — and lines inside
+fenced code blocks or blockquotes are ignored, so quoting another PR body, or a GitHub
 `[!IMPORTANT]` callout, never declares anything.
 
 ## CI
