@@ -236,6 +236,7 @@ ${fillLegend}
 <span><span class="k">dashed line</span> crosses repos</span>
 <span><span class="k">dashed card</span> not one of ${esc(author)}'s open PRs</span>
 <span><span class="k">◇ @handle</span> whose PR it is, when it is not ${esc(author)}'s to merge</span>
+<span><span class="k appr">✓ approved @handle</span> a human other than ${esc(author)} approved it — the border is thicker</span>
 <span><span class="k crit">⊘</span> the PR's own title says do not merge</span>
 <span><span class="k gate">GATED</span> release-gated: a published release, not just a merge</span>
 <span><span class="k met">✓ MET</span> that prerequisite has already landed</span>

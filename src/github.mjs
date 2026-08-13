@@ -107,6 +107,30 @@ export async function getChecks(repo, sha) {
   return out;
 }
 
+// Every review ever submitted on a PR, in submission order.
+//
+// This is a LOG, not a verdict: a reviewer who approved and later requested
+// changes is in it twice, and the endpoint has no "current state per reviewer"
+// form. So the whole list is fetched and src/reviews.mjs reduces it. Paged for
+// the same reason -- a long-running PR here already carries 17 reviews, and the
+// one that matters is usually the last.
+const reviewCache = new Map();
+export async function getReviews(repo, number) {
+  const key = `${repo}#${number}`;
+  if (reviewCache.has(key)) return reviewCache.get(key);
+  const out = [];
+  for (let page = 1; page <= 5; page++) {
+    const d = await api(`/repos/${repo}/pulls/${number}/reviews?per_page=100&page=${page}`, {
+      allow404: true
+    });
+    if (!d) break;
+    out.push(...d);
+    if (d.length < 100) break;
+  }
+  reviewCache.set(key, out);
+  return out;
+}
+
 const branchCache = new Map();
 export async function getBranchHead(repo, branch) {
   const key = `${repo}:${branch}`;
