@@ -625,8 +625,16 @@ export async function resolveStatus(edge, target) {
 
   // Release-gated: merging is not enough, it needs a published release AFTER
   // the merge landed.
+  // The release that CARRIED the change is the EARLIEST one published after the
+  // merge. getReleases() returns newest-first, so searching that order names the
+  // newest release instead and the label drifts onto every later publish. Search
+  // oldest-first. The copy matters: the list is cached and shared, and the
+  // awaiting-release branch below still reads releases[0] as the newest.
   const releases = await getReleases(edge.repo);
-  const after = releases.find(r => new Date(r.publishedAt) > new Date(target.merged_at));
+  const mergedAt = new Date(target.merged_at);
+  const after = [...releases]
+    .sort((a, b) => new Date(a.publishedAt) - new Date(b.publishedAt))
+    .find(r => new Date(r.publishedAt) > mergedAt);
   if (after) {
     return { satisfied: true, merged: true, status: `released in ${after.tag}`, release: after };
   }

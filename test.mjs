@@ -2134,6 +2134,68 @@ await t('once the parent merges the declaration alone still draws the edge', asy
   assert.match(html, /<path class="edge[^"]*met"/, 'and its arrow is drawn met');
 });
 
+// --- the release label names the release that CARRIED the change ---------
+//
+// snapshot.js#1225 merged at 14:11, v0.15.2 shipped 41 minutes later and really
+// did carry it, and v0.16.0 shipped the next morning. getReleases() hands the
+// list back newest-first, so taking the first release published after the merge
+// takes the NEWEST one -- and the label then moves onto whatever ships next,
+// every time, for ever. `satisfied` is right either way, which is why this went
+// unnoticed: only the tag on the card is wrong. Stubbed rather than live, so the
+// pin cannot expire the next time snapshot.js publishes.
+console.log('the release label names the release that shipped the change');
+
+const withFakeReleases = async (rels, fn) => {
+  const real = globalThis.fetch;
+  globalThis.fetch = async url => {
+    const u = String(url);
+    if (/\/releases\?/.test(u)) return respond(rels);
+    throw new Error(`the fake GitHub was asked for something it does not serve: ${u}`);
+  };
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = real;
+  }
+};
+const release = (tag, publishedAt) => ({
+  tag_name: tag,
+  published_at: publishedAt,
+  draft: false,
+  prerelease: false,
+  html_url: `https://github.com/fake/repo/releases/tag/${tag}`
+});
+// newest-first, exactly the order the endpoint and getReleases() produce
+const afterTheMerge = [
+  release('v0.16.0', '2026-08-14T10:38:34Z'),
+  release('v0.15.2', '2026-08-13T14:52:21Z'),
+  release('v0.15.1', '2026-08-06T11:50:11Z')
+];
+
+await t('a later release does not steal the label from the one that shipped it', async () => {
+  const r = await withFakeReleases(afterTheMerge, () =>
+    resolveStatus(
+      { repo: 'fake/release-order', needsRelease: true },
+      { merged_at: '2026-08-13T14:11:37Z', state: 'closed' }
+    )
+  );
+  assert.equal(r.satisfied, true, 'satisfied either way -- the verdict was never the bug');
+  assert.equal(r.release.tag, 'v0.15.2', 'the EARLIEST release after the merge, not the newest');
+  assert.equal(r.status, 'released in v0.15.2');
+});
+
+await t('and with nothing published since the merge it still awaits a release', async () => {
+  const r = await withFakeReleases(afterTheMerge, () =>
+    resolveStatus(
+      { repo: 'fake/release-none-since', needsRelease: true },
+      { merged_at: '2026-08-14T12:00:00Z', state: 'closed' }
+    )
+  );
+  assert.equal(r.satisfied, false);
+  assert.equal(r.status, 'merged, awaiting release');
+  assert.equal(r.latestRelease.tag, 'v0.16.0', 'the newest release, which this merge missed');
+});
+
 if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) {
   console.log('release gating (live API)');
   const RJS = 'snapshot-labs/snapshot.js';
