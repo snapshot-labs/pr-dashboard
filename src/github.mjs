@@ -117,6 +117,66 @@ export async function getBranchHead(repo, branch) {
   return sha;
 }
 
+// --- author avatars, fetched at BUILD time and inlined --------------------
+//
+// WHY THIS IS NOT api(). An avatar lives on a CDN, not on the API. It needs no
+// token and must not be sent one, it answers with bytes rather than JSON, and a
+// failure here is not a failure of the build. So it is a separate function with
+// no auth header rather than a flag on api().
+//
+// WHY INLINE AT ALL. The page's defining property is that it loads NOTHING at
+// view time: no CDN, no font, no script. Hotlinking an avatar would make a
+// publicly served page fetch a third-party image for every visitor, which hands
+// GitHub the IP and referrer of everyone who opens it and breaks the page
+// offline. Inlining costs bytes ONCE PER AUTHOR -- the page has twenty cards and
+// three authors -- and the result stays one self-contained file.
+//
+// TWO GUARDS, both deliberate:
+//
+//   the content-type allowlist is RASTER ONLY. An SVG avatar inlined into this
+//   SVG would be markup inside markup, and image/svg+xml is the one image type
+//   that can carry script. Browsers do load referenced images in a mode that
+//   blocks it; that is a second line of defence, not this one.
+//
+//   MAX_AVATAR_BYTES stops one pathological avatar from doubling a 45 KB page.
+//
+// Anything unexpected returns null and the card simply has no avatar. An avatar
+// is decoration on a page about merge order; it is never worth a failed build.
+const MAX_AVATAR_BYTES = 24 * 1024;
+const AVATAR_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const avatarCache = new Map();
+
+export async function getAvatar(url, size = 48) {
+  if (!url) return null;
+  const key = `${url}|${size}`;
+  if (avatarCache.has(key)) return avatarCache.get(key);
+
+  let out = null;
+  try {
+    const u = new URL(url);
+    // Ask GitHub for the size actually drawn rather than shrinking a 460px
+    // original into 14 CSS pixels of page weight.
+    u.searchParams.set('s', String(size));
+    const res = await fetch(u, {
+      headers: { accept: 'image/*', 'user-agent': 'snapshot-labs-pr-dashboard' }
+    });
+    calls++;
+    if (res.ok) {
+      const type = (res.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+      if (AVATAR_TYPES.has(type)) {
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length && buf.length <= MAX_AVATAR_BYTES) {
+          out = `data:${type};base64,${buf.toString('base64')}`;
+        }
+      }
+    }
+  } catch {
+    out = null;
+  }
+  avatarCache.set(key, out);
+  return out;
+}
+
 const releaseCache = new Map();
 export async function getReleases(repo) {
   if (releaseCache.has(repo)) return releaseCache.get(repo);

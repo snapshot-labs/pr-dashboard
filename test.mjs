@@ -5,6 +5,7 @@ import { classify } from './src/ci.mjs';
 import {
   accountWithheld,
   buildGraph,
+  collectAvatars,
   componentsOf,
   declaredEdge,
   expandMergedTrail,
@@ -19,6 +20,7 @@ import {
   resolveStatus
 } from './build.mjs';
 import {
+  AVATAR_PX,
   cardOf,
   columnLabel,
   descRef,
@@ -36,7 +38,7 @@ import {
   wrapText
 } from './src/graph.mjs';
 import { render } from './src/render.mjs';
-import { getPr } from './src/github.mjs';
+import { getAvatar, getPr } from './src/github.mjs';
 import { openPrState, PR_STATES, prState, STATE_GLYPH } from './src/state.mjs';
 
 let pass = 0;
@@ -2162,6 +2164,273 @@ await t('an edge that is both released and met keeps BOTH labels, apart', () => 
   const metY = Number(html.match(/<text class="elabel met" x="\d+" y="(\d+)"/)[1]);
   assert.ok(metY > gatedY + 10, `the two labels do not overlap (${gatedY} vs ${metY})`);
   assert.match(html, />GATED</);
+});
+
+
+// --- author avatars -------------------------------------------------------
+//
+// INLINED, not hotlinked. The page's defining property is that it loads nothing
+// at view time, and the cost of keeping that is bounded by the number of
+// AUTHORS rather than the number of cards: twenty cards by three authors put
+// three images in <defs> and twenty <use> references on the canvas.
+//
+// The privacy rule is the one that gets a NEGATIVE test at every layer: a
+// withheld card contributes no avatar, is never fetched for, and emits nothing.
+// An avatar is authorship in a second channel -- it survives the name being
+// stripped, and the redaction scanner cannot see it, because that scanner looks
+// for repo names and an avatar carries none.
+console.log('the author avatar, inlined and deduped by author');
+const PNG = 'data:image/png;base64,iVBORw0KGgo=';
+const avNode = (over = {}) => ({ hidden: false, avatarUrl: null, ...over });
+const stubFetch = map => async url => map[url] ?? null;
+
+await t('one <image> per AUTHOR, not per card: the cost is authors, not cards', async () => {
+  const nodes = [
+    avNode({ key: 'a#1', avatarUrl: 'u/tony' }),
+    avNode({ key: 'a#2', avatarUrl: 'u/tony' }),
+    avNode({ key: 'a#3', avatarUrl: 'u/wa' })
+  ];
+  const defs = await collectAvatars(nodes, stubFetch({ 'u/tony': PNG, 'u/wa': PNG }));
+  assert.equal(defs.length, 2, 'three cards, two authors, two images');
+  assert.deepEqual(nodes.map(n => n.avatarId), ['av1', 'av1', 'av2'], 'and two of them share one');
+});
+await t('an avatar id is never built from the handle', () => {
+  // A card that spends its whole existence not printing a name has no business
+  // carrying one in an element id.
+  assert.ok(['av1', 'av2'].every(id => /^av[0-9]+$/.test(id)));
+});
+await t('NEGATIVE: a WITHHELD card contributes no avatar and is never fetched for', async () => {
+  const asked = [];
+  const nodes = [
+    avNode({ key: 'a#1', avatarUrl: 'u/tony' }),
+    avNode({ key: 'x#9', avatarUrl: 'u/secret', hidden: true })
+  ];
+  const defs = await collectAvatars(nodes, async url => {
+    asked.push(url);
+    return PNG;
+  });
+  assert.deepEqual(asked, ['u/tony'], 'the hidden card\'s avatar is not even requested');
+  assert.equal(defs.length, 1);
+  assert.equal(nodes[1].avatarId, null, 'and it gets no id');
+});
+await t('an avatar that cannot be fetched leaves the card with none, not a broken one', async () => {
+  const nodes = [avNode({ key: 'a#1', avatarUrl: 'u/gone' })];
+  const defs = await collectAvatars(nodes, stubFetch({}));
+  assert.deepEqual(defs, []);
+  assert.equal(nodes[0].avatarId, null);
+});
+await t('redactPrivate strips the face and the date along with the name', () => {
+  const rec = redactPrivate({
+    title: 't', author: 'a', body: 'b', avatarUrl: 'u/secret', createdAt: '2026-01-01T00:00:00Z'
+  });
+  assert.deepEqual(
+    [rec.title, rec.author, rec.body, rec.avatarUrl, rec.createdAt, rec.hidden],
+    [null, null, '', null, null, true]
+  );
+});
+await t('a private edge TARGET loses its avatar and its date at the same instant as its name', () => {
+  const e = decorateEdge(
+    { author: 'wa0x6e', title: 's', avatarUrl: 'u/secret', createdAt: '2026-01-01T00:00:00Z', targetPrivate: true },
+    mine,
+    false
+  );
+  assert.deepEqual([e.title, e.author, e.avatarUrl, e.createdAt, e.hidden], [null, null, null, null, true]);
+});
+await t('a hidden node built from that edge carries neither, whatever the edge held', () => {
+  // Belt and braces: even handed an edge that somehow still had them.
+  const g = buildGraph([sp(491, [edge(S, 86, { hidden: true, avatarUrl: 'u/secret', createdAt: '2026-01-01T00:00:00Z' })])]);
+  const n = at(g, `${S}#86`);
+  assert.equal(n.hidden, true);
+  assert.equal(n.avatarUrl, null);
+  assert.equal(n.createdAt, null);
+});
+
+const avPage = (graph, avatars) => {
+  graph.avatars = avatars;
+  graph.layout = layoutGraph(graph);
+  return page(graph);
+};
+await t('the avatar is a <use> on the card and one <image> in <defs>, with a data: URI', () => {
+  const g = buildGraph([sp(491), sp(504)]);
+  g.nodes.forEach(n => (n.avatarId = 'av1'));
+  const html = avPage(g, [{ id: 'av1', href: PNG }]);
+  assert.equal(occurrences(html, '<image id="av1"'), 1, 'the bytes appear once');
+  assert.equal(occurrences(html, '<use href="#av1"'), 2, 'and every card points at them');
+  assert.match(html, /<clipPath id="av-clip"><circle/, 'clipped to a disc');
+  assert.match(html, /href="data:image\/png;base64,/, 'inlined, so the page still loads nothing');
+});
+await t('NOTHING is hotlinked: no third-party image request survives into the page', () => {
+  const g = buildGraph([sp(491)]);
+  g.nodes.forEach(n => (n.avatarId = 'av1'));
+  const html = avPage(g, [{ id: 'av1', href: PNG }]);
+  assert.doesNotMatch(html, /avatars\.githubusercontent\.com/, 'the page must not beacon to GitHub');
+  assert.doesNotMatch(html, /<image[^>]+href="https?:/i, 'no image is fetched at view time');
+});
+await t('the avatar is decoration: aria-hidden, no title of its own, no alt text', () => {
+  const g = buildGraph([sp(491)]);
+  g.nodes.forEach(n => (n.avatarId = 'av1'));
+  const html = avPage(g, [{ id: 'av1', href: PNG }]);
+  assert.match(html, /<g class="av" aria-hidden="true">/);
+  assert.doesNotMatch(html, /<use[^>]*>\s*<title/, 'whose the card is, is said in words in its own title');
+  // the <title> census still holds: one for the svg, one per node, one per edge
+  assert.equal(occurrences(html, '<title'), 1 + g.nodes.length + g.edges.length + 1);
+});
+await t('a failed avatar leaves a disc, not a hole, and shifts nothing', () => {
+  const g = buildGraph([sp(491)]);
+  g.nodes.forEach(n => (n.avatarId = 'av1'));
+  const html = avPage(g, [{ id: 'av1', href: PNG }]);
+  assert.match(html, /<circle class="avring"/, 'the ring is drawn independently of the image');
+  assert.match(html, /svg\.depgraph \.avring\{stroke:var\(--rule\)\}/);
+});
+await t('a card with NO avatar reserves no room, so nothing moves either way', () => {
+  const bare = cardOf({ repo: 'o/r', number: 1, title: 'x', kind: 'own' });
+  const withAv = cardOf({ repo: 'o/r', number: 1, title: 'x', kind: 'own', avatarId: 'av1' });
+  assert.equal(bare.avRoom, 0);
+  assert.equal(withAv.avRoom, AVATAR_PX + 6);
+  assert.equal(bare.avatar, null);
+  assert.equal(withAv.height, bare.height, 'the avatar never changes a card\'s height');
+});
+await t('NEGATIVE: a hidden card reserves no room and emits no avatar, id or no id', () => {
+  // The last gate before markup, so a future edit that forgets one of the two
+  // upstream ones still cannot print a withheld author's face.
+  const c = cardOf({ repo: 'o/r', number: 9, title: null, hidden: true, avatarId: 'av1' });
+  assert.equal(c.avatar, null);
+  assert.equal(c.avRoom, 0);
+  // Both cards are handed the same id. Only the visible one may draw it.
+  const g = buildGraph([sp(491, [edge(S, 86, { hidden: true, title: null, author: null })])]);
+  for (const n of g.nodes) n.avatarId = 'av1';
+  const html = avPage(g, [{ id: 'av1', href: PNG }]);
+  assert.equal(g.nodes.filter(n => n.hidden).length, 1, 'there is a hidden card to get this wrong');
+  assert.equal(occurrences(html, '<use href="#av1"'), 1, 'only the visible card uses it');
+});
+await t('the avatar REINFORCES the identity channels and replaces neither', () => {
+  const g = buildGraph([pr(2222, 'tony8713', [2219]), pr(2219, 'wa0x6e')], mine);
+  g.nodes.forEach(n => (n.avatarId = 'av1'));
+  const html = avPage(g, [{ id: 'av1', href: PNG }]);
+  assert.match(html, /<tspan class="g">◇<\/tspan> @wa0x6e<\/text>/, 'the handle is still printed');
+  assert.match(html, /<g class="node dep /, 'and the outline still says whose kind of work it is');
+  assert.match(html, /@wa0x6e — not yours to merge/, 'and the hover title still says it in words');
+});
+await t('getAvatar refuses SVG and oversized images, and inlines a PNG', async () => {
+  // image/svg+xml is the one image type that can carry script, and this one
+  // would be going inside our own SVG. The allowlist is raster only.
+  const real = globalThis.fetch;
+  const reply = (type, bytes) => async () => ({
+    ok: true,
+    headers: { get: k => (k === 'content-type' ? type : null) },
+    arrayBuffer: async () => new Uint8Array(bytes).buffer
+  });
+  try {
+    globalThis.fetch = reply('image/svg+xml', [60, 115, 118, 103]);
+    assert.equal(await getAvatar('https://example.test/a.svg'), null, 'svg is refused');
+    globalThis.fetch = reply('image/png', new Array(64 * 1024).fill(1));
+    assert.equal(await getAvatar('https://example.test/big.png'), null, 'oversized is refused');
+    globalThis.fetch = reply('image/png', [137, 80, 78, 71]);
+    assert.match(await getAvatar('https://example.test/ok.png'), /^data:image\/png;base64,/);
+    globalThis.fetch = async () => {
+      throw new Error('network down');
+    };
+    assert.equal(await getAvatar('https://example.test/down.png'), null, 'and a failure is not fatal');
+  } finally {
+    globalThis.fetch = real;
+  }
+});
+
+// --- ordering within a column --------------------------------------------
+//
+// WAS: repository name A to Z, then PR number ascending -- oldest at the top.
+// IS: most recently OPENED first, by created_at.
+//
+// It is the LAST key, not the first. The crossing-reduction keys still decide
+// first, so the sort only settles cards they leave tied. And it cannot fight the
+// graph: rank is the longest path to a node, so a drawn edge always lands its
+// head in a later column, and two cards in one column never have one between
+// them.
+console.log('within a column: most recently opened first');
+const dated = (number, iso, over = {}) => ({ ...sp(number), createdAt: iso, ...over });
+const colOrder = g => {
+  layoutGraph(g);
+  return [...g.nodes].sort((a, b) => a.y - b.y).map(n => n.number);
+};
+
+await t('a column runs newest first', () => {
+  const g = buildGraph([
+    dated(1, '2026-01-01T00:00:00Z'),
+    dated(2, '2026-08-01T00:00:00Z'),
+    dated(3, '2026-04-01T00:00:00Z')
+  ]);
+  assert.deepEqual(colOrder(g), [2, 3, 1]);
+});
+await t('...which is the reverse of what it was, and repo name no longer groups', () => {
+  // The old key was repo then number, so this used to come out score-api first.
+  const g = buildGraph([
+    { ...dated(9, '2026-08-01T00:00:00Z'), repo: 'snapshot-labs/stamp' },
+    { ...dated(1, '2026-01-01T00:00:00Z'), repo: 'snapshot-labs/score-api' }
+  ]);
+  assert.deepEqual(colOrder(g), [9, 1], 'the newer one leads, whichever repo it is in');
+});
+await t('a card with no readable date sinks below the dated ones', () => {
+  const g = buildGraph([sp(7), dated(2, '2026-01-01T00:00:00Z'), dated(3, '2026-08-01T00:00:00Z')]);
+  assert.deepEqual(colOrder(g), [3, 2, 7]);
+});
+await t('the order is total, so the same graph lays out the same whatever order it arrives in', () => {
+  const mk = order => {
+    const all = {
+      1: dated(1, '2026-01-01T00:00:00Z'),
+      2: dated(2, '2026-08-01T00:00:00Z'),
+      3: sp(3)
+    };
+    return buildGraph(order.map(k => ({ ...all[k] })));
+  };
+  assert.deepEqual(colOrder(mk([1, 2, 3])), colOrder(mk([3, 2, 1])));
+  assert.deepEqual(colOrder(mk([2, 3, 1])), colOrder(mk([1, 2, 3])));
+});
+await t('THE INVARIANT: no drawn edge ever joins two cards in the same column', () => {
+  // This is why an ordering inside a column cannot put a card ahead of something
+  // it depends on: there is nothing in the column for it to be ahead OF. Rank is
+  // the LONGEST path, so a drawn edge forces rank(head) >= rank(tail) + 1.
+  const g = buildGraph([
+    dated(1, '2026-08-01T00:00:00Z', { deps: [edge(S, 2)] }),
+    dated(2, '2026-01-01T00:00:00Z', { deps: [edge(S, 3)] }),
+    dated(3, '2026-02-01T00:00:00Z'),
+    dated(4, '2026-09-01T00:00:00Z')
+  ]);
+  layoutGraph(g);
+  for (const e of g.edges.filter(x => !x.cycle)) {
+    assert.ok(e.from.rank < e.to.rank, `${e.from.key} -> ${e.to.key} must cross a column`);
+    assert.notEqual(e.from.x, e.to.x, 'and it does, in the geometry too');
+  }
+  assert.deepEqual([...rankCensus(g).tangled], [], 'no rank holds an edge of its own');
+});
+await t('the NEWEST PR cannot outrank what it depends on, however new it is', () => {
+  // #1 is the newest thing on the page and depends on the oldest. It still sits
+  // to the RIGHT of it: recency never touches which column a card is in.
+  const g = buildGraph([
+    dated(1, '2026-12-31T00:00:00Z', { deps: [edge(S, 2)] }),
+    dated(2, '2020-01-01T00:00:00Z')
+  ]);
+  layoutGraph(g);
+  assert.equal(at(g, `${S}#2`).rank, 0, 'the old prerequisite merges first');
+  assert.equal(at(g, `${S}#1`).rank, 1);
+  assert.ok(at(g, `${S}#1`).x > at(g, `${S}#2`).x, 'and is drawn to the right of it');
+});
+await t('crossing reduction still outranks recency: a prerequisite still leads its column', () => {
+  // The same case as "the nodes something waits on lead their column", with the
+  // dates set so that recency alone would have put #15 last.
+  const many = Array.from({ length: 6 }, (_, i) => dated(i + 10, `2026-0${i + 2}-01T00:00:00Z`));
+  const g = buildGraph([...many, { ...dated(15, '2020-01-01T00:00:00Z') }, sp(1, [edge(S, 15)])]);
+  layoutGraph(g);
+  assert.equal(at(g, `${S}#15`).slot, 0, 'the thing something waits on still leads');
+});
+await t('a merged prerequisite sorts by its own open date, like every other card', () => {
+  const g = buildGraph([
+    dated(1, '2026-08-01T00:00:00Z', { deps: [mergedEdge(S, 400, { createdAt: '2026-07-01T00:00:00Z' })] }),
+    dated(2, '2026-06-01T00:00:00Z'),
+    dated(3, '2026-05-01T00:00:00Z')
+  ]);
+  layoutGraph(g);
+  const rank0 = [...g.nodes].filter(n => n.rank === 0).sort((a, b) => a.y - b.y).map(n => n.number);
+  assert.deepEqual(rank0, [400, 2, 3], 'opened in July, so it leads a column of June and May');
 });
 
 console.log('the legend and the text alternative say what the fill means');

@@ -88,6 +88,7 @@ import {
   apiCallCount,
   getBranchHead,
   getChecks,
+  getAvatar,
   getPr,
   getReleases,
   getRepo,
@@ -211,6 +212,17 @@ export function decorateEdge(edge, mine, includePrivate) {
   if (edge.targetPrivate && !includePrivate) {
     edge.title = null;
     edge.author = null;
+    // The avatar goes with the author, and for the same reason. An avatar is a
+    // picture of WHO opened a withheld PR: it is authorship by another channel,
+    // it survives having the name stripped, and the redaction scanner cannot see
+    // it (that scanner looks for repo names, and an avatar carries none). So it
+    // is nulled here, at the same instant as the name, rather than filtered
+    // later where a future edit could route around it.
+    edge.avatarUrl = null;
+    // And so does the open date. Nothing prints it, but it is the sort key for
+    // the card's position in its column, and a withheld card has no business
+    // carrying a fact about withheld work into the drawing at all.
+    edge.createdAt = null;
     edge.hidden = true;
   }
   return edge;
@@ -228,6 +240,14 @@ export function prRecord(full, repo, meta) {
     title: full.title,
     url: full.html_url,
     author: full.user ? full.user.login : null,
+    // The author's avatar, as a URL only. The bytes are fetched later and only
+    // for cards that survive the component rule, so a candidate that is never
+    // drawn costs no request.
+    avatarUrl: full.user ? full.user.avatar_url : null,
+    // WHEN THE PR WAS OPENED. `created_at`, deliberately: not `updated_at`,
+    // which a bot comment moves, and not `merged_at`, which most of these do not
+    // have. It is the sort key for a card's position WITHIN its column.
+    createdAt: full.created_at || null,
     draft: Boolean(full.draft),
     // What the card is filled with. Derived from the payload rather than
     // assumed: see src/state.mjs on why `draft` is a flag on an OPEN PR and why
@@ -258,6 +278,11 @@ export function redactPrivate(rec) {
   rec.title = null;
   rec.author = null;
   rec.body = '';
+  // Authorship by picture is still authorship: see decorateEdge(). A hidden card
+  // is a number and a nothing else, and that includes the face of whoever opened
+  // it and the day they opened it.
+  rec.avatarUrl = null;
+  rec.createdAt = null;
   rec.hidden = true;
   return rec;
 }
@@ -360,6 +385,8 @@ export async function declaredEdge(d) {
     url: target ? target.html_url : `https://github.com/${d.repo}/pull/${d.number}`,
     title: target ? target.title : null,
     author: target ? target.user.login : null,
+    avatarUrl: target && target.user ? target.user.avatar_url : null,
+    createdAt: target ? target.created_at || null : null,
     targetPrivate: Boolean(target && target.base && target.base.repo && target.base.repo.private),
     crossRepo: d.crossRepo,
     needsRelease: d.needsRelease,
@@ -654,6 +681,16 @@ async function main() {
     pr.ci.baseSha = baseSha ? baseSha.slice(0, 7) : null;
   }
 
+  // BEFORE the layout, because a card that carries an avatar reserves room for
+  // it on its ref line, and cardOf() is what layoutGraph() measures with.
+  graph.avatars = await collectAvatars(graph.nodes, getAvatar);
+  const withAvatar = graph.nodes.filter(n => n.avatarId).length;
+  console.log(
+    `avatars: ${graph.avatars.length} inlined for ${withAvatar} of ${graph.nodes.length} card(s), ` +
+      `${graph.avatars.reduce((n, a) => n + a.href.length, 0)} bytes of data URI; ` +
+      `${graph.nodes.filter(n => n.hidden).length} withheld card(s) got none`
+  );
+
   graph.layout = layoutGraph(graph);
   const groups = groupNodes(graph);
 
@@ -721,6 +758,56 @@ async function main() {
   });
   writeFileSync('dist/index.html', html);
   console.log(`wrote dist/index.html (${html.length} bytes, ${apiCallCount()} API calls)`);
+}
+
+// AUTHOR AVATARS, fetched once per AUTHOR and inlined into the SVG.
+//
+// The economics are the whole argument for inlining. There are twenty cards and
+// three authors, so the cost is three images, not twenty: the bytes go in
+// `<defs>` once each and every card is a `<use>` pointing at one. Hotlinking
+// would instead cost the page its one defining property -- that it loads nothing
+// at view time -- and would hand GitHub the IP of every visitor to a public page.
+//
+// THE PRIVACY RULE, and it is the only rule here that matters:
+//
+//   a hidden card contributes NO avatar, and no avatar is fetched for it.
+//
+// An avatar is authorship in a second channel. It survives the name being
+// stripped, it is a picture of who opened a withheld PR, and the redaction
+// scanner cannot see it -- that scanner matches repo names, and an avatar URL
+// carries none. So hidden cards are skipped here as well as blanked upstream in
+// redactPrivate() and decorateEdge(): three independent places, because this is
+// the failure this page has already had twice by other means.
+//
+// The ids are `av1`, `av2`, ... and never the handle. An id built from a login
+// would put the author's name back into the markup of a card that spent the rest
+// of its existence not printing it.
+//
+// `fetchAvatar(url)` is passed in so this is testable without the network. A url
+// that fails to fetch yields no id, and that card simply has no avatar: the
+// geometry reserves room only when there is one, so nothing shifts either way.
+export async function collectAvatars(nodes, fetchAvatar) {
+  const byUrl = new Map();
+  for (const n of nodes || []) {
+    if (n.hidden || !n.avatarUrl) continue;
+    if (!byUrl.has(n.avatarUrl)) byUrl.set(n.avatarUrl, { id: null, href: null });
+  }
+
+  const defs = [];
+  let seq = 0;
+  for (const [url, rec] of byUrl) {
+    const href = await fetchAvatar(url);
+    if (!href) continue;
+    rec.id = `av${++seq}`;
+    rec.href = href;
+    defs.push({ id: rec.id, href });
+  }
+
+  for (const n of nodes || []) {
+    const rec = !n.hidden && n.avatarUrl ? byUrl.get(n.avatarUrl) : null;
+    n.avatarId = rec && rec.id ? rec.id : null;
+  }
+  return defs;
 }
 
 // Is a prerequisite already met?
@@ -888,6 +975,11 @@ export function buildGraph(prs, mine = () => true, trail = [], bot = () => false
       // two is `kind`, which the outline reads.
       foreign: Boolean(pr.author) && !own,
       hidden: Boolean(pr.hidden),
+      // Both already nulled on a hidden record by redactPrivate(). Carried
+      // through rather than re-derived, so there is ONE place a withheld card
+      // loses its face and its date.
+      avatarUrl: pr.hidden ? null : pr.avatarUrl || null,
+      createdAt: pr.hidden ? null : pr.createdAt || null,
       // Only an UNTRACKED node states its status: every PR this build seeds is
       // open by construction, mine or the bot's, so printing "open" on one is the
       // same noise either way. The state is on the card regardless.
@@ -922,6 +1014,10 @@ export function buildGraph(prs, mine = () => true, trail = [], bot = () => false
           author: d.author,
           foreign: Boolean(d.foreign),
           hidden: Boolean(d.hidden),
+          // Same for an edge target: decorateEdge() nulled these the moment it
+          // nulled the author, so a private target arrives here already blank.
+          avatarUrl: d.hidden ? null : d.avatarUrl || null,
+          createdAt: d.hidden ? null : d.createdAt || null,
           status: d.status,
           // A prerequisite is the ONLY way a merged PR reaches this page, and
           // this is where that happens: it is the target of somebody's edge, so

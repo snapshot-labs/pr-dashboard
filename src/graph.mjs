@@ -100,6 +100,22 @@ const MARK_H = 12;
 const MARK_SIZE = 9.5;
 const TEXT_W = NODE_W - 2 * CARD_PAD_X;
 
+// The author's avatar, on the ref line at the left of the card.
+//
+// It sits THERE, and not in a corner, for a layout reason and a meaning reason.
+// The layout reason: the ref line is the one row whose contents are clipped to a
+// measured width, so taking room from it costs one subtraction and cannot push
+// anything out of the card -- the title rows are wrapped to TEXT_W and moving
+// them would change every card's height. The meaning reason: the card then reads
+// who, what, and what state, left to right, in one line.
+//
+// It is 14px because it is a reinforcement and not a channel of its own. Whose a
+// card is, is said by the outline and by `◇ @handle`; the avatar agrees with them
+// and carries nothing they do not.
+const AV = 14;
+const AV_GAP = 6;
+export const AVATAR_PX = AV;
+
 const lastTitleY = rows => TITLE_TOP + (Math.max(1, rows) - 1) * LINE_H;
 const markY = (rows, j) => lastTitleY(rows) + MARK_GAP + MARK_H + j * MARK_H;
 const cardHeight = (rows, marks) =>
@@ -297,8 +313,15 @@ export function cardOf(n) {
   // than against the whole width, so the two can never collide.
   const state = nodeState(n);
   const stateText = `${state.glyph} ${state.word}`;
-  const refRoom = TEXT_W - textWidth(stateText, MARK_SIZE) - 10;
+  // A withheld card never carries an avatar, whatever else it is holding. This
+  // is the third of the three independent gates -- build.mjs blanks the url on
+  // the record and again on the edge -- and it is the last one before markup.
+  const avatar = n.hidden ? null : n.avatarId || null;
+  const avRoom = avatar ? AV + AV_GAP : 0;
+  const refRoom = TEXT_W - textWidth(stateText, MARK_SIZE) - 10 - avRoom;
   return {
+    avatar,
+    avRoom,
     ref: clipToWidth(nodeRef(n), refRoom, REF_SIZE, true),
     state,
     stateText,
@@ -425,12 +448,58 @@ export function layoutGraph(graph) {
   for (let r = 0; r <= maxRank; r++) ranks.push([]);
   for (const n of nodes) ranks[n.rank].push(n);
 
+  // The final, total tiebreak. `key` is `repo#number` and is unique per node, so
+  // two cards can never compare equal: the layout is deterministic whatever order
+  // buildGraph happened to hand the nodes over in.
   const plain = (a, b) => a.repo.localeCompare(b.repo) || a.number - b.number;
+
+  // WITHIN A COLUMN: most recently opened first.
+  //
+  // What this replaced: `plain` alone, i.e. repository name A to Z and then PR
+  // number ascending, which put the oldest work at the top of every column and
+  // grouped it by repo. Nothing about that grouping was load-bearing -- own,
+  // bot and dep cards were never separated, nor were drafts from open ones, so
+  // no grouping is broken by this. The kinds are told apart by the outline and
+  // the marker, which is where that job belongs.
+  //
+  // WHAT IT DOES NOT TOUCH, which is the point:
+  //
+  //   This is the LAST key, not the first. The crossing-reduction keys below --
+  //   `waitedOnBy` at rank 0, `barycentre` above it -- still decide first, so a
+  //   card is still placed beside the thing it is joined to and the arrows still
+  //   do not cross. Recency only settles cards that those keys leave tied, which
+  //   on this page is most of them, because most PRs have no edges at all.
+  //
+  //   And it can never contradict a dependency, structurally rather than by
+  //   care: rank is the LONGEST path to a node, so a drawn edge a -> b forces
+  //   rank(b) >= rank(a) + 1. Two cards in the same column therefore have no
+  //   drawn edge between them, and an ordering inside a column cannot put
+  //   anything ahead of something it depends on. The one exception is an edge
+  //   CUT to break a cycle, which can join two cards of equal rank; that edge is
+  //   not drawn, the column is headed "a cycle is cut here" rather than "any
+  //   order" (see rankCensus), and a cycle has no satisfiable order to get wrong.
+  //
+  // `createdAt` is the PR's `created_at`: the day it was OPENED. Not
+  // `updated_at`, which any comment moves, and not `merged_at`, which most of
+  // these do not have. A card with no readable date -- an unreadable target, or a
+  // withheld one, whose date is blanked with its name -- sinks below the dated
+  // ones rather than claiming a position, and is then settled by `plain`.
+  const opened = n => (n.createdAt ? Date.parse(n.createdAt) : NaN);
+  const recent = (a, b) => {
+    const ta = opened(a);
+    const tb = opened(b);
+    const ua = Number.isNaN(ta);
+    const ub = Number.isNaN(tb);
+    if (ua && ub) return plain(a, b);
+    if (ua) return 1;
+    if (ub) return -1;
+    return tb - ta || plain(a, b);
+  };
 
   // Provisional order per rank, used only to seed the pass below.
   const prov = ranks.map(list => {
     const m = new Map();
-    [...list].sort(plain).forEach((n, i) => m.set(n.key, i));
+    [...list].sort(recent).forEach((n, i) => m.set(n.key, i));
     return m;
   });
 
@@ -460,14 +529,14 @@ export function layoutGraph(graph) {
         if (ba !== null && bb !== null && ba !== bb) return ba - bb;
         if (ba !== null && bb === null) return -1;
         if (ba === null && bb !== null) return 1;
-        return plain(a, b);
+        return recent(a, b);
       }
       const ua = waitedOnBy(a);
       const ub = waitedOnBy(b);
-      if (ua === null && ub === null) return plain(a, b);
+      if (ua === null && ub === null) return recent(a, b);
       if (ua === null) return 1;
       if (ub === null) return -1;
-      return ua - ub || plain(a, b);
+      return ua - ub || recent(a, b);
     });
 
     // One rank, one column, however tall. See the header of this file.
@@ -722,7 +791,27 @@ export function graphSvg(graph, ids = {}) {
     `<marker id="${id}" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="9"` +
     ' markerHeight="9" markerUnits="userSpaceOnUse" orient="auto">' +
     `<path class="${cls}" d="M0 0 L10 5 L0 10 Z" fill="currentColor"/></marker>`;
-  out.push(`<defs>${marker('dep-arrow', 'ahead')}${marker('dep-arrow-met', 'ahead met')}</defs>`);
+  // The avatars, ONCE EACH. Twenty cards by three authors put three images in
+  // here and twenty <use> references out there, which is the whole reason
+  // inlining is affordable at all. The href is a data: URI built at build time,
+  // so opening this page fetches nothing and tells GitHub nothing.
+  //
+  // `slice` rather than `meet`: GitHub avatars are square, but a non-square one
+  // must fill the disc and be cropped rather than letterboxed inside it.
+  const avatars = graph.avatars || [];
+  const avDefs = avatars.length
+    ? `<clipPath id="av-clip"><circle cx="${AV / 2}" cy="${AV / 2}" r="${AV / 2}"/></clipPath>` +
+      avatars
+        .map(
+          a =>
+            `<image id="${esc(a.id)}" width="${AV}" height="${AV}" clip-path="url(#av-clip)"` +
+            ` preserveAspectRatio="xMidYMid slice" href="${esc(a.href)}"/>`
+        )
+        .join('')
+    : '';
+  out.push(
+    `<defs>${marker('dep-arrow', 'ahead')}${marker('dep-arrow-met', 'ahead met')}${avDefs}</defs>`
+  );
 
   // The column headers, which is where the rank labels live now that a rank is a
   // column: MERGES FIRST sits at the left end of the canvas, MERGES LAST at the
@@ -805,7 +894,7 @@ export function graphSvg(graph, ids = {}) {
     const inner = [
       `<rect class="box" x="${n.x}" y="${n.y}" width="${NODE_W}" height="${c.height}" rx="6"` +
         ` fill="none" stroke="currentColor"/>`,
-      `<text class="ref" x="${n.x + CARD_PAD_X}" y="${n.y + REF_Y}"` +
+      `<text class="ref" x="${n.x + CARD_PAD_X + c.avRoom}" y="${n.y + REF_Y}"` +
         ` font-size="${REF_SIZE}">${esc(c.ref)}</text>`,
       // The fill, said in a glyph and a word, pinned to the right edge of the
       // ref line. No <title> of its own: the card already carries one, and it
@@ -813,6 +902,29 @@ export function graphSvg(graph, ids = {}) {
       `<text class="st" x="${n.x + NODE_W - CARD_PAD_X}" y="${n.y + REF_Y}"` +
         ` font-size="${MARK_SIZE}" text-anchor="end">${esc(c.stateText)}</text>`
     ];
+    // The avatar, and the ring that is also its fallback. If the image does not
+    // render -- a data URI a browser rejects, an <image> element it does not
+    // support -- what is left is an empty disc, not a hole and not a shifted
+    // card: this is SVG, so the graphic is placed by coordinate and nothing
+    // around it reflows. A card with no avatar reserved no room in the first
+    // place, so that case does not shift anything either.
+    //
+    // aria-hidden, because it is decoration in the strict sense: whose the card
+    // is, is already in the card's own <title> and in the graph's <desc>, in
+    // words. An alt text here would be a second, weaker copy of a fact the page
+    // already states properly -- and on a withheld card there is no avatar to
+    // describe and nothing that may be said about its author.
+    if (c.avatar) {
+      const ax = n.x + CARD_PAD_X;
+      const ay = n.y + REF_Y - 11;
+      inner.push(
+        `<g class="av" aria-hidden="true">` +
+          `<use href="#${esc(c.avatar)}" x="${ax}" y="${ay}"/>` +
+          `<circle class="avring" cx="${ax + AV / 2}" cy="${ay + AV / 2}" r="${AV / 2}"` +
+          ` fill="none" stroke="currentColor" stroke-width="0.5"/>` +
+          `</g>`
+      );
+    }
     c.lines.forEach((line, i) => {
       inner.push(
         `<text class="ttl${c.dim ? ' dim' : ''}" x="${n.x + CARD_PAD_X}"` +
@@ -886,6 +998,13 @@ svg.depgraph .node.dep .box{stroke-dasharray:4 3}
    next to a diamond, so nothing rests on telling one dash pattern from another,
    and nothing here rests on colour at all. */
 svg.depgraph .node.bot .box{stroke-dasharray:1 3}
+/* The author's avatar. Inlined at build time, so it is not a request: this page
+   still loads nothing at all. It REINFORCES the identity the card already
+   states -- the outline says whose kind of work it is, the diamond marker names
+   the author -- and it is never the only carrier of either, so a reader with images
+   off, or a browser that cannot draw it, loses no fact. The ring doubles as the
+   placeholder: an avatar that fails to draw leaves a disc, not a hole. */
+svg.depgraph .avring{stroke:var(--rule)}
 svg.depgraph a{text-decoration:none}
 /* the card: the ref identifies it, the TITLE is what it is */
 svg.depgraph .ref{font:600 10.5px ui-monospace,SFMono-Regular,Menlo,monospace;fill:var(--ink2)}
