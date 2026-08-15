@@ -390,6 +390,122 @@ await t('case-insensitive author match', () => {
   assert.equal(isMineFor('tony8713')(null), false);
 });
 
+// --- tracked bots ---------------------------------------------------------
+//
+// chai3-bot's PRs are TRACKED: they seed the page and anchor a component exactly
+// as the page author's do, and they are drawn wherever the ranking puts them.
+//
+// The premise worth testing against, because it is easy to assume the opposite:
+// there was never a rule confining somebody else's PR to a leaf or a root. The
+// component rule replaced that rule, and a foreign node has sat mid-graph ever
+// since (see "somebody else's PR can be a ROOT..." above, and the mid-graph case
+// below). What kept chai3-bot off the page was that nothing tracked was anywhere
+// in its component, so pruneComponents() dropped it -- not where it would have
+// been drawn, but whether. These tests pin BOTH: that a bot PR is drawn, and that
+// it is drawn in the middle of a chain when that is where its edges put it.
+console.log('a tracked bot anchors a component, and sits anywhere in the graph');
+const bot = isMineFor(['chai3-bot']);
+const botGraph = (prs, trail = []) => buildGraph(prs, mine, trail, bot);
+
+await t('isMineFor takes a LIST, and still takes one login', () => {
+  const both = isMineFor(['tony8713', 'chai3-bot']);
+  assert.equal(both('Tony8713'), true);
+  assert.equal(both('CHAI3-BOT'), true);
+  assert.equal(both('wa0x6e'), false);
+  assert.equal(both(null), false);
+  assert.equal(isMineFor(['tony8713', ''])(''), false, 'an empty login matches nothing');
+});
+await t('a LONE bot PR, on no edge at all, is drawn: it anchors its own component', () => {
+  // envelop#300 today: no declared dependency, nothing of mine anywhere near it.
+  // Under the old anchor it was a component of one with nothing tracked in it and
+  // was dropped whole; this is the whole of what the change does.
+  const g = botGraph([pr(1, 'tony8713'), pr(300, 'chai3-bot')]);
+  assert.deepEqual(g.nodes.map(n => n.number).sort((a, b) => a - b), [1, 300]);
+  assert.deepEqual(g.pruned, [], 'nothing dropped');
+  assert.equal(at(g, `${SX}#300`).kind, 'bot');
+});
+await t('NEGATIVE: without the bot predicate that same PR is still dropped', () => {
+  const g = buildGraph([pr(1, 'tony8713'), pr(300, 'chai3-bot')], mine);
+  assert.deepEqual(g.nodes.map(n => n.number), [1]);
+  assert.deepEqual(g.pruned, [`${SX}#300`], 'so the anchor really is what changed');
+});
+await t('a bot PR sits MID-GRAPH: an arrow in and an arrow out, rank 1 of 2', () => {
+  // The thing to prove, stated as the shape it has to have. #500 (mine) <- #300
+  // (the bot's) <- #700 (mine): the bot's card is neither a root nor a leaf, and
+  // nothing in the ranking knows or cares who wrote it.
+  const g = botGraph([
+    pr(500, 'tony8713'),
+    pr(300, 'chai3-bot', [500]),
+    pr(700, 'tony8713', [300])
+  ]);
+  const n = at(g, `${SX}#300`);
+  assert.deepEqual(needs(n), [`${SX}#500`], 'an arrow arrives');
+  assert.deepEqual(neededBy(n), [`${SX}#700`], 'and an arrow leaves');
+  assert.deepEqual([at(g, `${SX}#500`).rank, n.rank, at(g, `${SX}#700`).rank], [0, 1, 2]);
+  assert.equal(n.kind, 'bot', 'and it is a full card there, not a stub');
+});
+await t('a bot PR can be a ROOT with prerequisites of its own, and a LEAF', () => {
+  const g = botGraph([pr(300, 'chai3-bot', [301]), pr(301, 'chai3-bot'), pr(9, 'tony8713', [300])]);
+  assert.equal(at(g, `${SX}#301`).rank, 0, 'the leftmost card is the bot\'s');
+  assert.deepEqual(neededBy(at(g, `${SX}#300`)), [`${SX}#9`]);
+  const h = botGraph([pr(9, 'tony8713'), pr(300, 'chai3-bot', [9])]);
+  assert.deepEqual(neededBy(at(h, `${SX}#9`)), [`${SX}#300`], 'and it can be the last card too');
+  assert.equal(at(h, `${SX}#300`).neededBy.length, 0);
+});
+await t('a bot PR anchors a chain of STRANGERS, drawn in full, with none of mine in it', () => {
+  // The anchor is genuinely equal to mine: no PR of tony8713's is anywhere in
+  // this component, and it is still drawn whole.
+  const g = botGraph([pr(300, 'chai3-bot', [901]), pr(901, 'wa0x6e', [902]), pr(902, 'bonustrack')]);
+  assert.deepEqual(g.nodes.map(n => n.number).sort((a, b) => a - b), [300, 901, 902]);
+  assert.deepEqual(g.pruned, []);
+  assert.deepEqual(
+    g.nodes.filter(n => n.kind === 'dep').map(n => n.number).sort((a, b) => a - b),
+    [901, 902],
+    'and the strangers are still marked as strangers'
+  );
+});
+await t('NEGATIVE: a chain with neither mine nor a bot\'s in it is still dropped whole', () => {
+  const g = botGraph([pr(1, 'tony8713'), pr(901, 'wa0x6e', [902]), pr(902, 'bonustrack')]);
+  assert.deepEqual(g.nodes.map(n => n.number), [1]);
+  assert.deepEqual(g.pruned, [`${SX}#901`, `${SX}#902`], 'the bound did not move for everyone');
+});
+await t('a bot PR is FOREIGN, so it keeps the ◇ @handle mark: tracked is not mine', () => {
+  const g = botGraph([pr(300, 'chai3-bot')]);
+  const n = at(g, `${SX}#300`);
+  assert.equal(n.foreign, true, 'not the page author\'s, and the card has to say so');
+  assert.equal(n.kind, 'bot', 'but not merely referenced either');
+  assert.equal(n.status, undefined, 'seeded open, so "open" is noise, same as mine');
+});
+await t('a merged bot PR is a dep like any merged PR, and trips no assertion', () => {
+  // Parallel to `own`: 'bot' means an OPEN PR. A merged one arrives as an edge
+  // target, is filed dep, and is legal precisely because something needs it.
+  const g = botGraph([
+    pr(9, 'tony8713', [{ number: 300, author: 'chai3-bot', merged: true, targetState: 'merged' }])
+  ]);
+  const n = at(g, `${SX}#300`);
+  assert.equal(n.kind, 'dep');
+  assert.equal(n.state, 'merged');
+  assert.deepEqual(mergedNonPrerequisites(g), [], 'it IS a prerequisite, so it is allowed');
+});
+await t('a merged bot PR that nothing needs is caught, exactly as a merged one of mine is', () => {
+  const g = botGraph([{ ...pr(300, 'chai3-bot'), state: 'merged' }]);
+  assert.deepEqual(mergedNonPrerequisites(g), [`${SX}#300`], 'kind:bot is an OPEN PR or it is a bug');
+});
+await t('a merged PR of the BOT\'s anchors its component, as a merged one of mine does', () => {
+  const g = botGraph([pr(901, 'wa0x6e', [{ number: 300, author: 'chai3-bot' }])]);
+  assert.deepEqual(g.nodes.map(n => n.number).sort((a, b) => a - b), [300, 901]);
+  assert.deepEqual(g.pruned, [], 'the anchor reads the AUTHOR, not the kind');
+});
+await t('groupNodes counts a bot apart from mine AND apart from the merely referenced', () => {
+  const g = botGraph([pr(9, 'tony8713', [300]), pr(300, 'chai3-bot', [901]), pr(901, 'wa0x6e')]);
+  const [group] = groupNodes(g);
+  assert.deepEqual(group.mine.map(n => n.number), [9]);
+  assert.deepEqual(group.bots.map(n => n.number), [300]);
+  assert.deepEqual(group.referenced.map(n => n.number), [901]);
+  assert.equal(group.count, 1, 'the open-PR total stays the page author\'s');
+  assert.equal(group.botCount, 1);
+  assert.deepEqual(group.nodes.map(n => n.number), [9, 300, 901], 'and every node lands in one');
+});
 console.log('edge authorship marking');
 await t('another author is flagged foreign', () => {
   assert.equal(decorateEdge({ author: 'wa0x6e' }, mine, false).foreign, true);
@@ -432,6 +548,21 @@ await t('a withheld PR by another author that nothing depends on is NOT counted'
   // "withheld" would overstate what privacy is hiding.
   const r = accountWithheld([wh('snapshot-labs/a-private-repo', 90, 'someone-else')], [pr(1, 'tony8713')], mine);
   assert.equal(r.count, 0);
+});
+await t("a tracked BOT's private PR is counted as withheld, on the same terms as mine", () => {
+  // The privacy consequence of tracking a second author, pinned. A tracked
+  // author's private-repo PR is WITHHELD and counted -- never redacted and drawn
+  // -- so widening the tracked set widens what the notice OWNS UP TO, not what
+  // the page prints.
+  const tracked = isMineFor(['tony8713', 'chai3-bot']);
+  const priv = [wh('snapshot-labs/a-private-repo', 42, 'chai3-bot')];
+  const r = accountWithheld(priv, [pr(1, 'tony8713')], tracked);
+  assert.deepEqual([r.count, r.referenced, r.blocking], [1, 0, 0]);
+  assert.equal(
+    accountWithheld(priv, [pr(1, 'tony8713')], mine).count,
+    0,
+    'and it is the TRACKED predicate that counts it, not the page-author one'
+  );
 });
 
 const S = 'snapshot-labs/stamp';
@@ -1529,6 +1660,84 @@ await t("somebody else's PR is marked ◇ @handle on a dashed card, with a legen
     'and the legend explains the glyph'
   );
   assert.doesNotMatch(html, /not yours · @wa0x6e/, 'the long form is gone');
+});
+// A tracked bot's card is the third value of the "whose work is this" channel:
+// solid = the page author's, dotted = a tracked bot's, dashed = in the way. The
+// dash pattern is the SECOND carrier -- every card that is not the page author's
+// still prints `◇ @handle` -- so none of this rests on telling one dotted line
+// from one dashed line, and none of it rests on colour, which the fill owns.
+const botPage = (graph, over = {}) =>
+  render({
+    graph,
+    author: 'tony8713',
+    org: 'snapshot-labs',
+    generatedAt: '2026-01-01T00:00:00Z',
+    withheld: { count: 0, referenced: 0, blocking: 0 },
+    total: graph.nodes.filter(n => n.kind === 'own').length,
+    bots: ['chai3-bot'],
+    botTotal: graph.nodes.filter(n => n.kind === 'bot').length,
+    ...over
+  });
+await t("a tracked bot's card is DOTTED, marked ◇ @handle, and keyed in the legend", () => {
+  const g = botGraph([pr(9, 'tony8713', [300]), pr(300, 'chai3-bot')]);
+  const html = botPage(g);
+  assert.match(html, /<g class="node bot st-open">/, 'its own class, so its own outline');
+  assert.match(html, /svg\.depgraph \.node\.bot \.box\{stroke-dasharray:1 3\}/, 'dotted');
+  assert.match(html, /svg\.depgraph \.node\.dep \.box\{stroke-dasharray:4 3\}/, 'dashed is still dashed');
+  assert.match(html, /<tspan class="g">◇<\/tspan> @chai3-bot<\/text>/, 'and it still names its author');
+  assert.match(
+    html,
+    /<span class="k">dotted card<\/span> a tracked bot's open PR \(@chai3-bot\) — scheduled here like tony8713's own/,
+    'a mark on the canvas is a legend entry or it is nothing'
+  );
+});
+await t("a tracked bot's PR is NOT counted in the page author's open-PR total", () => {
+  const g = botGraph([pr(9, 'tony8713'), pr(300, 'chai3-bot'), pr(301, 'chai3-bot')]);
+  const html = botPage(g);
+  assert.match(html, /1 open PR ·/, 'one of mine, not three');
+  assert.match(html, /2 more by @chai3-bot/, 'and the bot count is stated, not folded in');
+});
+await t('the page says a bot PR is here to be scheduled, not because it is in the way', () => {
+  const html = botPage(botGraph([pr(9, 'tony8713'), pr(300, 'chai3-bot')]));
+  assert.match(html, /A tracked bot's PR is dotted, not dashed/);
+  assert.match(html, /<strong>Tracked bots\.<\/strong>/);
+  assert.match(html, /There is no rule on this page\s*about <em>where<\/em> a card may sit/);
+  assert.match(html, /A bot's PR in a private repo is withheld and counted in the notice above/);
+});
+await t('NEGATIVE: with no tracked bot the page says nothing about one', () => {
+  const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
+  assert.doesNotMatch(html, /dotted card|tracked bot|chai3-bot/);
+  assert.match(html, /A chain with none of tony8713's PRs in it is\s*not drawn at all/);
+});
+await t('the text alternative names a tracked bot as one, not just as somebody else', () => {
+  const g = botGraph([pr(9, 'tony8713', [300]), pr(300, 'chai3-bot'), pr(901, 'wa0x6e', [9])]);
+  layoutGraph(g);
+  assert.equal(descRef(at(g, `${SX}#300`)), 'sx-monorepo#300 (by @chai3-bot, a tracked bot)');
+  assert.equal(descRef(at(g, `${SX}#901`)), "sx-monorepo#901 (by @wa0x6e, not the page author's)");
+  const desc = graphDesc(g);
+  assert.match(desc, /belongs to the page author or to a tracked bot/);
+  assert.match(desc, /A tracked bot's pull request is named as one/);
+  assert.doesNotMatch(graphDesc(buildGraph([sp(491)])), /tracked bot/, 'and only when one is drawn');
+});
+await t("a tracked bot's card carries CI on hover, exactly as the page author's does", () => {
+  const p = pr(300, 'chai3-bot');
+  p.ci = { state: 'own-red', ownFailures: [{ name: 'Test' }], baseFailures: [], pending: [], total: 1, passed: 0 };
+  const html = botPage(botGraph([pr(9, 'tony8713'), p]));
+  assert.match(html, /<title>sx-monorepo#300 — pr 300 — open, and marked ready for review — red on its own/);
+  assert.match(html, /@chai3-bot — a tracked bot's PR, drawn and scheduled like the page author's/);
+});
+await t("a release gate on a bot PR's edge is drawn like any other", () => {
+  // Release gating is a property of the EDGE, not of who wrote either end, and
+  // this pins that it stays that way with a bot on one end.
+  const g = botGraph([
+    pr(300, 'chai3-bot', [
+      { number: 1225, repo: JS, crossRepo: true, needsRelease: true, satisfied: false, status: 'merged, awaiting release', merged: true, targetState: 'merged' }
+    ]),
+    pr(9, 'tony8713', [300])
+  ]);
+  const html = botPage(g);
+  assert.match(html, /GATED/, 'the gate is on the arrow into the bot\'s card');
+  assert.match(html, /release-gated: satisfied by a published release, not by a merge/);
 });
 await t('a foreign ROOT is marked too, and so is every foreign card behind it', () => {
   // The card the old rule could not draw at all: not mine, at the left end, with

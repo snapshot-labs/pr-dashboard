@@ -105,6 +105,7 @@ Three markers survive, each with a legend entry under the drawing, because each 
 | `~ merged, awaiting release` | on a card | it landed and it is *still* in the way |
 | `◇ @handle` | on a card | not `PR_AUTHOR`'s PR, so not theirs to merge |
 | dashed outline | on a card | not one of `PR_AUTHOR`'s open PRs: somebody else's, or a prerequisite of theirs that has already merged |
+| dotted outline | on a card | a **tracked bot**'s open PR (`PR_BOT_AUTHORS`): scheduled here like `PR_AUTHOR`'s own, still marked `◇ @handle`, still outside the open-PR count |
 | `⊘ …` | on a card | the PR's **own title** says do not merge |
 | `GATED` | on an **edge** | release-gated: a published release clears it, a merge does not |
 
@@ -261,12 +262,15 @@ switches Netlify on with no code change, and Pages can then be turned off or lef
 
 ## Whose PRs are on it
 
-**Whole connected components, drawn when at least one PR in them is `PR_AUTHOR`'s.**
+**Whole connected components, drawn when at least one PR in them is *tracked*.**
+
+Tracked means `PR_AUTHOR` or one of `PR_BOT_AUTHORS` (`chai3-bot` today). Both seed the search and
+both anchor a component; only `PR_AUTHOR` is "yours".
 
 Split the dependency graph into connected components, treating every edge as **undirected** — a
 component is everything transitively joined by dependency edges, followed in either direction. A
 component is drawn **in full**, every card in it and whoever wrote them, if **at least one** PR in it
-is `PR_AUTHOR`'s. A component with none of `PR_AUTHOR`'s in it is not drawn at all.
+is tracked. A component with nothing tracked in it is not drawn at all.
 
 So somebody else's PR is a full card: it can be a root, it can have prerequisites of its own drawn
 behind it, and it is not confined to being the target of one of your arrows. What it can never be is
@@ -283,10 +287,14 @@ so if `#2219` had prerequisites of its own the page hid what `#2222` was really 
 Nobody's PR arrives here for being recent, interesting, or in the same repo. Concretely:
 
 - `buildGraph()` builds a node for every PR handed to it, whoever wrote it, and marks it `kind:
-  'own'` (yours, carrying CI) or `kind: 'dep'` (anybody else's, dashed and marked `◇`).
-- `pruneComponents()` then drops every component holding no PR of yours, in one piece, and reports
+  'own'` (yours, carrying CI), `kind: 'bot'` (a tracked bot's open PR — dotted, marked `◇`, carrying
+  CI, counted separately) or `kind: 'dep'` (anybody else's, dashed and marked `◇`).
+- `pruneComponents()` then drops every component holding no *tracked* PR, in one piece, and reports
   each dropped PR on `graph.pruned` — so what the page leaves out is stated, not quietly filtered.
-  `componentsOf()` is the undirected walk it uses.
+  `componentsOf()` is the undirected walk it uses. This is the **only** clause that decides whether a
+  card is on the page: there is no rule anywhere about *where* a card may sit, and rank is computed
+  from edges alone, so a tracked bot's PR — like anybody else's — appears as a root, a leaf or a
+  middle node according to its edges and nothing else.
 - The build sweeps the open PRs of the repos it already has a reason to open — the repos your open
   PRs live in, plus any repo a drawn dependency points into — and treats what it finds as
   *candidates*. A candidate on no dependency edge at all is not even offered to `buildGraph()`, so
@@ -435,7 +443,8 @@ python3 -m http.server -d dist             # look at it
 | Env var | Default | Meaning |
 |---|---|---|
 | `GH_TOKEN` / `GITHUB_TOKEN` | — | required |
-| `PR_AUTHOR` | `tony8713` | whose PRs |
+| `PR_AUTHOR` | `tony8713` | whose PRs — "yours", the open-PR count, the unmarked cards |
+| `PR_BOT_AUTHORS` | `chai3-bot` | comma-separated bots whose open PRs are *also* seeded and anchor components; marked, dotted, counted apart. Set to empty for a page with none |
 | `PR_ORG` | `snapshot-labs` | which org |
 | `INCLUDE_PRIVATE` | `false` | render PRs from private repos |
 
@@ -447,8 +456,11 @@ appear on the page, in this README, or in the tests. By default those PRs are **
 quietly drop them. Set `INCLUDE_PRIVATE=true` only for a build that is not public.
 
 The count measures what privacy is hiding and nothing else, so it counts only PRs the page **would
-otherwise have drawn**: yours, plus anybody's that something drawn depends on. A private PR that the
-component rule would prune anyway — no PR of yours anywhere in its component — is not counted as
+otherwise have drawn**: every tracked author's — yours and a tracked bot's alike — plus anybody's
+that something drawn depends on. Tracking a bot therefore widens what the notice *owns up to*, never
+what the page prints: a tracked author's private-repo PR is withheld and counted, on exactly the
+terms yours are, and is never redacted-and-drawn. A private PR that the
+component rule would prune anyway — nothing tracked anywhere in its component — is not counted as
 withheld, because calling it withheld would overstate the loss. The notice also says how many of
 them block a PR shown on the page, because a withheld PR that blocks nothing costs the graph a card
 with no edges rather than a broken chain. Today that is **2 withheld, 0 blocking**.

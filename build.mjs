@@ -4,9 +4,22 @@
 // end of.
 //
 // Whose PRs are on it: whole connected components, drawn when ONE PR in them is
-// mine. Somebody else's PR standing in a chain of mine is a full node, marked as
-// not mine; a chain with none of mine in it is not drawn at all. See the block
-// above isMineFor().
+// TRACKED. Tracked means the page author (PR_AUTHOR) or one of the tracked bots
+// (PR_BOT_AUTHORS, chai3-bot today). Anybody else's PR standing in a tracked
+// chain is a full node, marked as not the page author's; a chain with nothing
+// tracked in it is not drawn at all. See the block above isMineFor().
+//
+// Three kinds of node, and the outline is the channel that says which:
+//
+//   own   the page author's open PR          solid outline,  no author mark
+//   bot   a tracked bot's open PR            dotted outline, `◇ @handle`
+//   dep   anything else on the page          dashed outline, `◇ @handle`
+//
+// A bot's PR is first-class in every structural sense -- it seeds the search, it
+// anchors its component, it takes edges in and out, it is release-gated like any
+// other, it carries CI -- and marked in every presentational one. It is not
+// counted in the open-PR total at the top of the page, which stays the page
+// author's, and it gets its own count beside it instead.
 //
 // WHICH MERGED PRs are on it, which is a separate rule and a narrower one:
 //
@@ -91,6 +104,32 @@ export { shortRef };
 
 const AUTHOR = process.env.PR_AUTHOR || 'tony8713';
 const ORG = process.env.PR_ORG || 'snapshot-labs';
+
+// TRACKED AUTHORS: whose open PRs SEED this page.
+//
+// Two roles that used to be one word, and separating them is the whole of the
+// chai3-bot change:
+//
+//   AUTHOR      the PAGE author. "Mine". An unmarked card is this person's, the
+//               open-PR total at the top counts this person's, and the withheld
+//               notice speaks in this person's name.
+//   BOT_AUTHORS automation whose PRs are tracked HERE as first-class work. Their
+//               open PRs seed the page and anchor a component exactly as the page
+//               author's do -- so a bot's PR is drawn wherever it sits, alone or
+//               mid-chain -- but they are never silently filed as the page
+//               author's. Every one carries `◇ @handle` and a dotted outline.
+//
+// Why the bot list is not simply folded into AUTHOR: `isMine` decides four
+// different things, and only ONE of them ("does this anchor a component") should
+// widen. Folding chai3-bot into AUTHOR would also have made its PRs unmarked, put
+// them in the open-PR total, and made the withheld notice say a bot's private PRs
+// are the page author's own. Those are all wrong, and each is a separate line
+// below.
+const BOT_AUTHORS = (process.env.PR_BOT_AUTHORS ?? 'chai3-bot')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+export const TRACKED_AUTHORS = [AUTHOR, ...BOT_AUTHORS];
 // Private repos are withheld from the built page by default, because the page
 // is served publicly. The page still SAYS they were withheld -- it never
 // pretends the work does not exist.
@@ -121,9 +160,44 @@ const INCLUDE_PRIVATE = process.env.INCLUDE_PRIVATE === 'true';
 // Today the new rule reaches exactly one PR the old one already drew --
 // sx-monorepo#2219 (wa0x6e's), which #2222 of mine is branched off -- and it
 // keeps two all-bonustrack stacks OUT, because no PR of mine is anywhere in them.
-export const isMineFor = author => login =>
-  String(login || '').toLowerCase() === String(author).toLowerCase();
+//
+// WHAT THE COMPONENT RULE IS ANCHORED ON, since chai3-bot.
+//
+// "at least one PR in it is mine" is really "at least one PR in it is TRACKED",
+// and the tracked set is the page author plus the bot authors. That is the only
+// clause chai3-bot widened. It is worth being exact about what was and was NOT
+// standing in a bot's way before, because the two are easily confused:
+//
+//   NOT a restriction: where a node may sit. There has been no leaf-or-root rule
+//   here since the component rule replaced the old one (see the paragraph above).
+//   Somebody else's PR is already drawn mid-graph today -- sx-monorepo#2219 is
+//   drawn in column 2 of 3 with an arrow in and an arrow out.
+//
+//   The actual restriction: a component with no TRACKED PR anywhere in it is
+//   dropped whole, and nothing but a tracked author's PRs is ever searched for in
+//   the first place. chai3-bot's PRs declare no dependency and nothing of mine
+//   declares them, so each was a component of one with nothing tracked in it, and
+//   pruneComponents() dropped every one. Seeding them is what puts them on the
+//   page; no positional rule had to be lifted, because there was none.
+//
+// Accepts one login or a list of them, so the same factory builds "is the page
+// author" and "is any tracked author".
+export const isMineFor = authors => {
+  const set = new Set(
+    (Array.isArray(authors) ? authors : [authors])
+      .map(a => String(a || '').toLowerCase())
+      .filter(Boolean)
+  );
+  return login => set.has(String(login || '').toLowerCase());
+};
 const isMine = isMineFor(AUTHOR);
+// A tracked bot. Not "mine" -- the page says whose every card is -- but its work
+// anchors a component, seeds the search, and is counted as withheld when private,
+// all exactly as mine is.
+const isBot = isMineFor(BOT_AUTHORS);
+// The union, which is what the component rule and the candidate/withheld
+// accounting are anchored on.
+const isTracked = isMineFor(TRACKED_AUTHORS);
 
 // Flags a dependency edge so the page can say whose PR the target is.
 //
@@ -378,8 +452,23 @@ export async function expandMergedTrail(seeds, declaredBy, limit = TRAIL_LIMIT) 
 }
 
 async function main() {
-  const found = await searchOpenPrs(AUTHOR, ORG);
-  console.log(`search: ${found.length} open PRs by ${AUTHOR} in ${ORG}`);
+  // One search per tracked author rather than one query with two `author:`
+  // qualifiers. GitHub does OR repeated qualifiers, but the page's whole seed set
+  // would then rest on that being true, and it costs one API call to not depend
+  // on it. Deduped by repo#number: an author cannot appear twice, but a future
+  // tracked list with an alias in it could.
+  const found = [];
+  const seenItem = new Set();
+  for (const who of TRACKED_AUTHORS) {
+    const items = await searchOpenPrs(who, ORG);
+    console.log(`search: ${items.length} open PRs by ${who} in ${ORG}`);
+    for (const item of items) {
+      const key = `${item.repository_url.split('/repos/')[1]}#${item.number}`;
+      if (seenItem.has(key)) continue;
+      seenItem.add(key);
+      found.push(item);
+    }
+  }
 
   const repoMeta = new Map();
   const loadRepo = async name => {
@@ -406,17 +495,25 @@ async function main() {
   }
   seed.sort((a, b) => a.repo.localeCompare(b.repo) || a.number - b.number);
 
-  // The search is already scoped to author:AUTHOR, so this reclassifies nothing
+  // The searches are scoped to the tracked authors, so this reclassifies nothing
   // today. It is here so "a node is MINE only if I wrote it" survives a widened
   // query rather than depending on one word in a search string: a PR by anybody
-  // else that arrives through the seed search is treated as a candidate like any
-  // other, marked as not mine, and kept only if it lands in a component of mine.
-  const misfiled = seed.filter(p => !isMine(p.author));
+  // untracked that arrives through the seed search is treated as a candidate like
+  // any other, marked as not mine, and kept only if it lands in a tracked
+  // component. This is exactly the check chai3-bot must NOT be allowed to
+  // short-circuit -- a bot's PR is seeded, but it is still not mine.
+  const misfiled = seed.filter(p => !isTracked(p.author));
   if (misfiled.length) {
-    console.log(`${misfiled.length} seed PR(s) not authored by ${AUTHOR}: treated as anybody else's`);
+    console.log(
+      `${misfiled.length} seed PR(s) not authored by ${TRACKED_AUTHORS.join(' or ')}: ` +
+        `treated as anybody else's`
+    );
   }
 
-  const withheldAll = seed.filter(p => isMine(p.author) && p.private && !INCLUDE_PRIVATE);
+  // A tracked author's private-repo PR is WITHHELD and counted, never redacted
+  // and drawn. Same deal for the bot as for me: the page says the work exists and
+  // says nothing else about it.
+  const withheldAll = seed.filter(p => isTracked(p.author) && p.private && !INCLUDE_PRIVATE);
 
   // --- the search space, and why it is this and not "the org" -----------
   //
@@ -431,7 +528,7 @@ async function main() {
   const pool = new Map();
   const addCandidate = rec => {
     if (rec.private && !INCLUDE_PRIVATE) {
-      if (isMine(rec.author)) return null; // withheld, and counted as withheld
+      if (isTracked(rec.author)) return null; // withheld, and counted as withheld
       redactPrivate(rec);
     }
     if (!pool.has(rec.key)) pool.set(rec.key, rec);
@@ -462,7 +559,9 @@ async function main() {
     // something the component rule "left out" -- it is simply somebody else's
     // unrelated PR, and handing it to buildGraph would make `graph.pruned` a list
     // of every other open PR in the org instead of the chains this page declined
-    // to draw. My own PRs go in regardless: each is at least a component of one.
+    // to draw. A TRACKED author's PRs go in regardless: each is at least a
+    // component of one, which is the whole reason a lone chai3-bot PR with no
+    // declared dependency is on the page at all.
     const onAnEdge = new Set();
     for (const p of pool.values()) {
       for (const d of p.deps) {
@@ -470,8 +569,8 @@ async function main() {
         onAnEdge.add(`${d.repo}#${d.number}`);
       }
     }
-    feed = [...pool.values()].filter(p => isMine(p.author) || onAnEdge.has(p.key));
-    graph = buildGraph(feed, isMine, trail.records);
+    feed = [...pool.values()].filter(p => isTracked(p.author) || onAnEdge.has(p.key));
+    graph = buildGraph(feed, isMine, trail.records, isBot);
 
     // A cross-repo edge can land in a repo nothing on the page lives in yet, and
     // whatever else is joined to the far end of it belongs to the component too.
@@ -508,7 +607,7 @@ async function main() {
       return out.sort(edgeOrder);
     }
   );
-  if (trail.records.length) graph = buildGraph(feed, isMine, trail.records);
+  if (trail.records.length) graph = buildGraph(feed, isMine, trail.records, isBot);
   console.log(
     `trail: ${trail.visited.length} merged PR(s) walked, ${trail.records.length} of them carrying ` +
       `prerequisites of their own`
@@ -534,12 +633,19 @@ async function main() {
 
   // --- CI attribution ----------------------------------------------------
   //
-  // Mine only, and only for the ones actually drawn. Somebody else's node states
-  // whose it is instead: "whose PR is this" outranks CI in the one line a box
-  // has, and under the component rule that line is the only thing standing
-  // between a foreign root and a reader who assumes the page is all mine.
+  // The TRACKED authors' own open PRs, and only the ones actually drawn. An
+  // untracked node states whose it is instead: "whose PR is this" outranks CI in
+  // the one line a box has, and under the component rule that line is the only
+  // thing standing between a foreign root and a reader who assumes the page is
+  // all mine.
+  //
+  // A tracked bot's PR gets CI attributed because it is first-class work here --
+  // it is drawn to be merged, and the same hover phrase should answer the same
+  // question on it as on mine. It costs two or three API calls per bot PR, which
+  // is why it is scoped to DRAWN nodes rather than to the pool.
   const drawnMine = graph.nodes.filter(n => n.kind === 'own').map(n => n.pr);
-  for (const pr of drawnMine) {
+  const drawnBot = graph.nodes.filter(n => n.kind === 'bot').map(n => n.pr);
+  for (const pr of [...drawnMine, ...drawnBot]) {
     const prChecks = await getChecks(pr.repo, pr.headSha);
     const baseSha = await getBranchHead(pr.repo, pr.base);
     const baseChecks = baseSha ? await getChecks(pr.repo, baseSha) : [];
@@ -554,7 +660,7 @@ async function main() {
   const withheld = accountWithheld(
     withheldAll,
     graph.nodes.map(n => n.pr).filter(Boolean),
-    isMine,
+    isTracked,
     trail.records.flatMap(r => r.deps)
   );
   console.log(
@@ -568,15 +674,26 @@ async function main() {
     'card fill: ' +
       PR_STATES.map(st => `${st} ${graph.nodes.filter(n => n.state === st).length}`).join(', ')
   );
+  const tracked = TRACKED_AUTHORS.join(' or ');
   console.log(
     `components: ${componentsOf(graph.nodes).length} drawn, each holding at least one PR by ` +
-      `${AUTHOR}; ${graph.pruned.length} candidate PR(s) dropped for being in a component with ` +
-      `none of ${AUTHOR}'s${graph.pruned.length ? `: ${graph.pruned.join(', ')}` : ''}`
+      `${tracked}; ${graph.pruned.length} candidate PR(s) dropped for being in a component with ` +
+      `none of theirs${graph.pruned.length ? `: ${graph.pruned.join(', ')}` : ''}`
   );
-  const others = graph.nodes.filter(n => n.kind !== 'own');
+  if (drawnBot.length) {
+    console.log(
+      `tracked bots: ${drawnBot.length} node(s) drawn as first-class work, marked but not counted ` +
+        `among ${AUTHOR}'s: ` +
+        graph.nodes
+          .filter(n => n.kind === 'bot')
+          .map(n => `${n.key} (@${n.author})`)
+          .join(', ')
+    );
+  }
+  const others = graph.nodes.filter(n => n.kind === 'dep');
   if (others.length) {
     console.log(
-      `not ${AUTHOR}'s, drawn because a component says so: ` +
+      `not ${tracked}'s, drawn because a component says so: ` +
         others
           .map(n => `${n.hidden ? `#${n.number}` : n.key}${n.author ? ` (@${n.author})` : ''}`)
           .join(', ')
@@ -585,7 +702,8 @@ async function main() {
   for (const g of groups) {
     console.log(
       `${g.repo}: ${g.count} mine` +
-        (g.referenced.length ? `, ${g.referenced.length} in the graph but not mine` : '') +
+        (g.bots.length ? `, ${g.bots.length} by a tracked bot` : '') +
+        (g.referenced.length ? `, ${g.referenced.length} in the graph but not tracked` : '') +
         `, ${g.last.length} that nothing waits on`
     );
   }
@@ -597,7 +715,9 @@ async function main() {
     org: ORG,
     generatedAt: new Date().toISOString(),
     withheld,
-    total: drawnMine.length
+    total: drawnMine.length,
+    bots: BOT_AUTHORS,
+    botTotal: drawnBot.length
   });
   writeFileSync('dist/index.html', html);
   console.log(`wrote dist/index.html (${html.length} bytes, ${apiCallCount()} API calls)`);
@@ -649,9 +769,12 @@ export async function resolveStatus(edge, target) {
 // What the "N PRs withheld" notice is allowed to count.
 //
 // The notice exists to admit the page is incomplete, so it must count only PRs
-// the page would otherwise have DRAWN. Under the component rule that is: my own
-// PRs (each is at least a component of one, so each is always drawn), plus
-// anybody's PR that something drawn depends on. A PR that is neither is missing
+// the page would otherwise have DRAWN. Under the component rule that is: every
+// TRACKED author's PRs (each is at least a component of one, so each is always
+// drawn), plus anybody's PR that something drawn depends on. `tracked` is
+// therefore the union predicate, not "is it mine" -- a bot's private-repo PR
+// would have been drawn had the repo been public, so withholding it is something
+// this notice has to own up to. A PR that is neither is missing
 // from the graph for reasons that have nothing to do with privacy -- most often
 // because no PR of mine is anywhere in its component -- and counting it as
 // "withheld" would overstate what privacy is hiding.
@@ -662,7 +785,7 @@ export async function resolveStatus(edge, target) {
 // node has no PR record of its own -- it arrives as an edge target -- so its
 // edges are handed in separately, and they put nodes on the page exactly as a
 // drawn PR's own edges do.
-export function accountWithheld(withheldPrs, drawn, mine, trailDeps = []) {
+export function accountWithheld(withheldPrs, drawn, tracked, trailDeps = []) {
   const referenced = new Set();
   const blockers = new Set();
   const take = d => {
@@ -674,7 +797,7 @@ export function accountWithheld(withheldPrs, drawn, mine, trailDeps = []) {
   for (const d of trailDeps) take(d);
 
   const key = p => `${p.repo}#${p.number}`;
-  const counted = withheldPrs.filter(p => mine(p.author) || referenced.has(key(p)));
+  const counted = withheldPrs.filter(p => tracked(p.author) || referenced.has(key(p)));
   return {
     count: counted.length,
     referenced: counted.filter(p => referenced.has(key(p))).length,
@@ -723,7 +846,20 @@ export const edgeOrder = (a, b) =>
 // A merged PR is never `kind: 'own'`, even when it is mine. `own` means one of my
 // OPEN PRs -- the ones that carry CI and that the total at the top counts -- and
 // a merged one is neither. mergedNonPrerequisites() asserts it.
-export function buildGraph(prs, mine = () => true, trail = []) {
+//
+// `kind: 'bot'` is the third value, and it is exactly parallel to `own`: a
+// TRACKED BOT's open PR. First-class in every structural sense -- it anchors its
+// component, it is drawn wherever the ranking puts it, it carries CI -- and
+// marked in every presentational one: `◇ @handle` on the card and a dotted
+// outline, so it never reads as the page author's.
+//
+// Parallel to `own` includes the merged rule: a merged PR is never `kind: 'bot'`
+// either. A merged PR reaches this page only as the target of somebody's edge,
+// where attach() files it `dep`, and it is dashed there whoever wrote it --
+// mine, the bot's, or a stranger's. Whose it is still shows, in the `◇ @handle`
+// mark; what changes at the merge is that it stops being work to schedule and
+// becomes a link of the trail. mergedNonPrerequisites() asserts both halves.
+export function buildGraph(prs, mine = () => true, trail = [], bot = () => false) {
   const K = (repo, number) => `${repo}#${number}`;
   const byKey = new Map();
   const nodes = [];
@@ -737,19 +873,25 @@ export function buildGraph(prs, mine = () => true, trail = []) {
     const key = K(pr.repo, pr.number);
     if (byKey.has(key)) continue;
     const own = mine(pr.author);
+    const tracked = own || bot(pr.author);
     add({
       key,
-      kind: own ? 'own' : 'dep',
+      kind: own ? 'own' : bot(pr.author) ? 'bot' : 'dep',
       repo: pr.repo,
       number: pr.number,
       url: pr.url,
       title: pr.title,
       author: pr.author,
+      // `foreign` is "not the PAGE author's", and a tracked bot's PR is foreign:
+      // that is what earns it the `◇ @handle` mark, which is the same mark
+      // anybody else's card gets and needs no new vocabulary. What separates the
+      // two is `kind`, which the outline reads.
       foreign: Boolean(pr.author) && !own,
       hidden: Boolean(pr.hidden),
-      // Only somebody else's node states its state: the page's whole premise is
-      // that my own are open, so saying "open" on each of mine is noise.
-      status: own ? undefined : pr.status || 'open',
+      // Only an UNTRACKED node states its status: every PR this build seeds is
+      // open by construction, mine or the bot's, so printing "open" on one is the
+      // same noise either way. The state is on the card regardless.
+      status: tracked ? undefined : pr.status || 'open',
       // The fill. Every PR this build FETCHES is open, mine or not: the search
       // is `is:open` and the component sweep reads open PRs only. So a card
       // built from a record is open or draft, and merged reaches the page by
@@ -836,7 +978,7 @@ export function buildGraph(prs, mine = () => true, trail = []) {
   }
 
   const graph = { nodes, edges, byKey };
-  graph.pruned = pruneComponents(graph, mine);
+  graph.pruned = pruneComponents(graph, login => mine(login) || bot(login));
   rankNodes(graph);
   return graph;
 }
@@ -874,19 +1016,30 @@ export function componentsOf(nodes) {
 // THE RULE, in one function.
 //
 // A component is drawn in full -- every node in it, whoever wrote it -- if at
-// least one PR in it is mine. A component with none of mine in it is dropped
-// whole: not a lone node kept for context, not a stub, nothing. The keys of every
-// PR dropped that way come back for `graph.pruned`, so what the page leaves out
-// is stated rather than quietly filtered.
+// least one PR in it is TRACKED. A component with nothing tracked in it is
+// dropped whole: not a lone node kept for context, not a stub, nothing. The keys
+// of every PR dropped that way come back for `graph.pruned`, so what the page
+// leaves out is stated rather than quietly filtered.
+//
+// `anchors` is the tracked-author predicate: the page author, plus any tracked
+// bot. It is deliberately read off the node's AUTHOR and not off its kind, so a
+// tracked author's MERGED PR -- which arrives as an edge target and is therefore
+// `kind: 'dep'` -- anchors its component too. That was already true of mine and
+// is now true of the bot's, for the same reason: a merged PR of ours is still
+// ours, and the chain it sits in is still work this page is about.
+//
+// This is the ONLY clause that decides whether a bot's PR is on the page. There
+// is no rule anywhere in this build about WHERE an untracked or bot node may sit
+// -- no leaf rule, no root rule. Rank is computed from edges alone.
 //
 // Cycle-cut edges count as connections here. Ranking cuts the edge that closes a
 // cycle so the layout terminates, but the two PRs it joins are still one piece of
 // work -- which is why this runs BEFORE rankNodes().
-export function pruneComponents(graph, mine = () => true) {
+export function pruneComponents(graph, anchors = () => true) {
   const keep = new Set();
   const dropped = [];
   for (const comp of componentsOf(graph.nodes)) {
-    if (comp.some(n => n.kind === 'own' || mine(n.author))) {
+    if (comp.some(n => n.kind === 'own' || n.kind === 'bot' || anchors(n.author))) {
       for (const n of comp) keep.add(n.key);
     } else {
       for (const n of comp) dropped.push(n.key);
@@ -952,9 +1105,15 @@ export function rankNodes(graph) {
 // So: merged means prerequisite, and this asserts it instead of trusting the
 // search string -- the same reason duplicateNodes() is an assertion and not a
 // footnote.
+// `kind: 'bot'` is checked alongside `own` for the same reason: both mean "a
+// tracked author's OPEN pull request", and a merged PR is neither.
 export function mergedNonPrerequisites(graph) {
   return graph.nodes
-    .filter(n => n.state === 'merged' && (n.kind === 'own' || n.neededBy.length === 0))
+    .filter(
+      n =>
+        n.state === 'merged' &&
+        (n.kind === 'own' || n.kind === 'bot' || n.neededBy.length === 0)
+    )
     .map(n => n.key);
 }
 
@@ -975,11 +1134,14 @@ export const WITHHELD_GROUP = '__withheld__';
 //
 // `g.count` counts MY PRs only. Somebody else's is on the page because a chain of
 // mine runs through it, and counting it among my open PRs would be a second way
-// of implying it is mine.
+// of implying it is mine. A tracked bot's PR gets its own bucket, `g.bots`, for
+// exactly that reason: it is neither mine nor merely referenced, and folding it
+// into either would misstate one of the two.
 export function groupNodes(graph) {
   const byRepo = new Map();
   const take = (key, label) => {
-    if (!byRepo.has(key)) byRepo.set(key, { repo: key, label, mine: [], referenced: [] });
+    if (!byRepo.has(key))
+      byRepo.set(key, { repo: key, label, mine: [], bots: [], referenced: [] });
     return byRepo.get(key);
   };
 
@@ -987,7 +1149,7 @@ export function groupNodes(graph) {
     const g = n.hidden
       ? take(WITHHELD_GROUP, 'private repos — names withheld')
       : take(n.repo, n.repo);
-    (n.kind === 'own' ? g.mine : g.referenced).push(n);
+    (n.kind === 'own' ? g.mine : n.kind === 'bot' ? g.bots : g.referenced).push(n);
   }
 
   const groups = [...byRepo.values()].sort(
@@ -998,12 +1160,16 @@ export function groupNodes(graph) {
 
   for (const g of groups) {
     g.mine.sort((a, b) => a.number - b.number);
+    g.bots.sort((a, b) => a.number - b.number);
     g.referenced.sort((a, b) => a.number - b.number);
     g.withheld = g.repo === WITHHELD_GROUP;
     g.count = g.mine.length;
-    g.nodes = [...g.mine, ...g.referenced];
+    g.botCount = g.bots.length;
+    g.nodes = [...g.mine, ...g.bots, ...g.referenced];
     // Nothing on this page waits on these, so they are this repo's merge-last.
-    g.last = g.mine.filter(n => n.neededBy.length === 0);
+    // A tracked bot's PR counts: this is about what is schedulable, and a bot's
+    // open PR is as schedulable as mine.
+    g.last = [...g.mine, ...g.bots].filter(n => n.neededBy.length === 0);
   }
   return groups;
 }

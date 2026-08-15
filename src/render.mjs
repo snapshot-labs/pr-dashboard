@@ -64,7 +64,22 @@ export function fillKey(statesPresent) {
     .join('\n');
 }
 
-export function render({ graph, author, org, generatedAt, withheld, total }) {
+// `bots` are the tracked bot logins and `botTotal` how many of their open PRs the
+// page drew. Both default to empty, so a build with no tracked bot renders the
+// page it always did -- no extra legend entry, no extra count, no wording about a
+// distinction that is not on the canvas.
+export function render({
+  graph,
+  author,
+  org,
+  generatedAt,
+  withheld,
+  total,
+  bots = [],
+  botTotal = 0
+}) {
+  const botList = bots.map(b => `@${b}`).join(', ');
+  const botHandles = bots.length ? esc(botList) : '';
   if (!graph.layout) graph.layout = layoutGraph(graph);
   const drawn = graph.edges.filter(e => !e.cycle);
   const cut = graph.edges.filter(e => e.cycle);
@@ -113,7 +128,15 @@ export function render({ graph, author, org, generatedAt, withheld, total }) {
     ? `<details class="fold warn">
 <summary>${n} PR${many ? 's' : ''} withheld from this page</summary>
 <p><strong>${n} PR${many ? 's' : ''} withheld.</strong>
-       ${many ? `They are ${esc(author)}'s own and live in private repos` : `It is ${esc(author)}'s own and lives in a private repo`},
+       ${
+         bots.length
+           ? many
+             ? `They are ${esc(author)}'s own or a tracked bot's (${botHandles}) and live in private repos`
+             : `It is ${esc(author)}'s own or a tracked bot's (${botHandles}) and lives in a private repo`
+           : many
+             ? `They are ${esc(author)}'s own and live in private repos`
+             : `It is ${esc(author)}'s own and lives in a private repo`
+       },
        and this page is served publicly, so ${many ? 'they are' : 'it is'} not drawn here.
        ${
          withheld.blocking
@@ -212,7 +235,11 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
 </head><body><main>
 
 <h1>Open PRs — merge left to right</h1>
-<p class="sub">${esc(author)} · ${esc(org)} · ${total} open PR${total === 1 ? '' : 's'} ·
+<p class="sub">${esc(author)} · ${esc(org)} · ${total} open PR${total === 1 ? '' : 's'}${
+    botTotal
+      ? ` · ${botTotal} more by ${botHandles}`
+      : ''
+  } ·
   built ${esc(generatedAt.replace('T', ' ').slice(0, 16))} UTC</p>
 
 <figure class="graph">
@@ -234,7 +261,11 @@ ${fillLegend}
 <span><span class="k">arrow</span> merge the tail before the head</span>
 <span><span class="k">same column</span> one rank — no order between them</span>
 <span><span class="k">dashed line</span> crosses repos</span>
-<span><span class="k">dashed card</span> not one of ${esc(author)}'s open PRs</span>
+<span><span class="k">dashed card</span> not one of ${esc(author)}'s open PRs</span>${
+    bots.length
+      ? `\n<span><span class="k">dotted card</span> a tracked bot's open PR (${botHandles}) — scheduled here like ${esc(author)}'s own</span>`
+      : ''
+  }
 <span><span class="k">◇ @handle</span> whose PR it is, when it is not ${esc(author)}'s to merge</span>
 <span><span class="k crit">⊘</span> the PR's own title says do not merge</span>
 <span><span class="k gate">GATED</span> release-gated: a published release, not just a merge</span>
@@ -262,13 +293,28 @@ the full title and the edges it sits on.</p>
 <li><strong>Every PR is drawn exactly once</strong>, as one card carrying its repo, its number and
     its title. A PR that two others need is one card with two arrows leaving it, not two cards.</li>
 <li><strong>Whole chains are drawn, not just ${esc(author)}'s share of them.</strong> If one PR in a
-    chain is ${esc(author)}'s, every PR joined to it — following the arrows in <em>either</em>
-    direction — is drawn too, whoever wrote it. A chain with none of ${esc(author)}'s PRs in it is
+    chain is ${esc(author)}'s${bots.length ? `, or one of ${botHandles}'s` : ''}, every PR joined to it — following the arrows in <em>either</em>
+    direction — is drawn too, whoever wrote it. ${
+      bots.length
+        ? `A chain with none of theirs in it is`
+        : `A chain with none of ${esc(author)}'s PRs in it is`
+    }
     not drawn at all, and nothing arrives here except through a declared dependency.</li>
 <li><strong>Every card that is not ${esc(author)}'s says so</strong>, wherever it sits: dashed, and
     marked <code>◇ @handle</code>, including one that starts a chain and has prerequisites of its
     own. An unmarked card is ${esc(author)}'s — that marker is the only thing that says whose a PR
-    is, so read it.</li>
+    is, so read it.</li>${
+      bots.length
+        ? `
+<li><strong>A tracked bot's PR is dotted, not dashed</strong> — ${botHandles} — and it is on this
+    page for a different reason from every other card that is not ${esc(author)}'s. A dashed card is
+    here because it stands <em>in the way</em> of ${esc(author)}'s work; a dotted one is here
+    because it <em>is</em> work this page schedules, so it appears alone or mid-chain on its own
+    account, takes arrows in and out, and is release-gated like any other. It still carries
+    <code>◇ @handle</code>, and it is <em>not</em> counted in ${esc(author)}'s open-PR total at the
+    top — it has its own count beside it.</li>`
+        : ''
+    }
 <li><strong>The colour a card is filled with is the state of that PR</strong> —
     <span class="sw st-open">${STATE_GLYPH.open}</span>open,
     <span class="sw st-draft">${STATE_GLYPH.draft}</span>draft, or
@@ -330,10 +376,29 @@ across the moment it lands — without it the top of the chain disappears exactl
 <p><strong>Whose PRs appear here.</strong> Take the dependency graph and split it into
 <em>connected chains</em> — everything joined by dependency edges, following them in either
 direction. A chain is drawn <strong>in full</strong> if <strong>at least one</strong> PR in it is
-<code>${esc(author)}</code>'s; a chain with none of ${esc(author)}'s in it is not drawn at all. So
+<code>${esc(author)}</code>'s${
+    bots.length ? ` or ${botHandles}'s` : ''
+  }; a chain with none of ${bots.length ? 'theirs' : `${esc(author)}'s`} in it is not drawn at all. So
 somebody else's PR is a full card here, with its own prerequisites, and can be the leftmost thing in
 the picture — what it never is, is unmarked: every card that is not <code>${esc(author)}</code>'s is
-dashed and carries <code>◇ @handle</code>, and it is not counted in the open-PR total at the top.</p>
+dashed and carries <code>◇ @handle</code>, and it is not counted in the open-PR total at the top.</p>${
+    bots.length
+      ? `
+<p><strong>Tracked bots.</strong> ${botHandles} ${
+          bots.length === 1 ? 'is' : 'are'
+        } tracked here, which means ${
+          bots.length === 1 ? 'its' : 'their'
+        } open PRs <em>seed</em> this page the way
+<code>${esc(author)}</code>'s do: each one anchors its own chain, so it is drawn whether or not
+anything of <code>${esc(author)}</code>'s is joined to it, and it sits wherever its dependencies put
+it — first column, last, or in the middle, exactly like any other card. There is no rule on this page
+about <em>where</em> a card may sit; rank comes from edges and nothing else. What tracking does
+<strong>not</strong> do is make the work <code>${esc(author)}</code>'s: a bot's card is dotted rather
+than dashed, still carries <code>◇ @handle</code>, and is counted separately from the open-PR total
+at the top. A bot's PR in a private repo is withheld and counted in the notice above, on the same
+terms as <code>${esc(author)}</code>'s own.</p>`
+      : ''
+  }
 <p>This replaced a narrower rule — <em>somebody else's PR is drawn only as the target of one of
 ${esc(author)}'s edges, never a card of its own</em> — which cut a chain off at the first PR that was
 not ${esc(author)}'s and so hid what the rest of it was waiting for. The bound did not change:
