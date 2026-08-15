@@ -42,6 +42,17 @@ export INCLUDE_PRIVATE=false
 
 PMP_DIR="${PMP_DIR:-/root/pr-merge-poller}"
 
+# One publish at a time. `node build.mjs` writes dist/index.html and the next
+# three lines read it, so two concurrent runs can scan one build and push
+# another. There is more than one agent on this box and they do publish: two
+# overlapped on 2026-08-15. Waiting is right rather than exiting, because the
+# caller wanted the page refreshed and the other run is refreshing it.
+exec 9>"$root/.publish.lock"
+if ! flock -w 600 9; then
+  echo "another publish has held $root/.publish.lock for 600s; giving up" >&2
+  exit 1
+fi
+
 "$PMP_DIR/test-triage.py"
 node build.mjs
 "$PMP_DIR/redaction-scan.py" dist/index.html
