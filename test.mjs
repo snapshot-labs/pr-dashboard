@@ -2194,10 +2194,23 @@ await t('one <image> per AUTHOR, not per card: the cost is authors, not cards', 
   assert.equal(defs.length, 2, 'three cards, two authors, two images');
   assert.deepEqual(nodes.map(n => n.avatarId), ['av1', 'av1', 'av2'], 'and two of them share one');
 });
-await t('an avatar id is never built from the handle', () => {
+await t('an avatar id is never built from the handle', async () => {
   // A card that spends its whole existence not printing a name has no business
-  // carrying one in an element id.
-  assert.ok(['av1', 'av2'].every(id => /^av[0-9]+$/.test(id)));
+  // carrying one in an element id. Checked against what collectAvatars actually
+  // emits, for handles it would be tempting to slugify.
+  const nodes = [
+    avNode({ key: 'a#1', author: 'tony8713', avatarUrl: 'u/tony8713' }),
+    avNode({ key: 'a#2', author: 'chai3-bot', avatarUrl: 'u/chai3-bot' })
+  ];
+  const defs = await collectAvatars(nodes, stubFetch({ 'u/tony8713': PNG, 'u/chai3-bot': PNG }));
+  const ids = defs.map(d => d.id).concat(nodes.map(n => n.avatarId));
+  assert.ok(ids.length >= 4);
+  for (const id of ids) {
+    assert.match(id, /^av[0-9]+$/, `${id} must be opaque`);
+    for (const handle of ['tony8713', 'chai3-bot']) {
+      assert.ok(!id.includes(handle), `${id} leaks ${handle}`);
+    }
+  }
 });
 await t('NEGATIVE: a WITHHELD card contributes no avatar and is never fetched for', async () => {
   const asked = [];
