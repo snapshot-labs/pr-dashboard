@@ -265,6 +265,12 @@ export function nodeState(n) {
 // one of the author's arrows; now somebody else's PR can be the leftmost card in
 // the picture with prerequisites of its own, and this marker plus the dashed
 // outline are the only things saying whose it is.
+//
+// A tracked bot's card takes the SAME marker, by the same test -- it is not the
+// page author's, so it says whose it is. What separates it from an ordinary
+// foreign card is the outline (dotted, not dashed), which is a second channel and
+// not the one carrying the handle. Nothing here rests on telling one dash pattern
+// from another: the handle is printed.
 export function nodeMarks(n, hold) {
   const out = [];
   if (hold) out.push({ role: 'critical', glyph: '⊘', text: hold });
@@ -314,11 +320,18 @@ export function nodeTitleText(n) {
   // The state in words, for every card and not only for a draft: this is the
   // fill spelled out, and it is what a reader gets who cannot use the colour.
   bits.push(nodeState(n).label);
-  if (n.kind === 'own') {
+  // CI is attributed to the tracked authors' own open PRs, mine and a tracked
+  // bot's alike, so the same phrase answers the same question on both.
+  if (n.kind === 'own' || n.kind === 'bot') {
     if (n.pr && n.pr.ci) bits.push(CI_LABEL[n.pr.ci.state] || 'CI state unknown');
-  } else if (n.hidden) bits.push('private repo, details withheld');
-  else if (!n.author) bits.push('author unknown');
-  else if (n.foreign) bits.push(`@${n.author} — not yours to merge`);
+  }
+  if (n.hidden) bits.push('private repo, details withheld');
+  else if (n.kind === 'bot')
+    bits.push(`@${n.author} — a tracked bot's PR, drawn and scheduled like the page author's`);
+  else if (n.kind !== 'own') {
+    if (!n.author) bits.push('author unknown');
+    else if (n.foreign) bits.push(`@${n.author} — not yours to merge`);
+  }
   // Said in full words. The hover text is where a reader gets the detail back
   // now that the per-PR list is gone, and "already merged" is the detail that
   // decides whether a card to the left is still in anybody's way.
@@ -545,6 +558,12 @@ export function columnLabel(r, maxRank, count, unordered = true, allMerged = fal
 export const descRef = n => {
   const notes = [];
   if (n.hidden) notes.push('private repository, details withheld');
+  // A tracked bot is named as one. The picture separates it from an ordinary
+  // foreign card with a dotted outline rather than a dashed one, and a reader who
+  // is not looking at the picture gets that same distinction in words here --
+  // otherwise the text alternative would flatten two different reasons a card is
+  // on the page into one phrase.
+  else if (n.kind === 'bot') notes.push(`by @${n.author}, a tracked bot`);
   else if (n.kind !== 'own') {
     if (!n.author) notes.push('author unknown');
     else if (n.foreign) notes.push(`by @${n.author}, not the page author's`);
@@ -560,6 +579,10 @@ export const descRef = n => {
 export function graphDesc(graph) {
   const drawn = (graph.edges || []).filter(e => !e.cycle);
   const cut = (graph.edges || []).filter(e => e.cycle);
+  // Only explain the tracked-bot distinction when one is actually on the canvas.
+  // A key to a mark nothing uses is noise here for the same reason it is in the
+  // legend, and a page with no bot on it reads exactly as it always did.
+  const hasBots = graph.nodes.some(n => n.kind === 'bot');
 
   const ranks = [];
   for (const n of graph.nodes) (ranks[n.rank || 0] ||= []).push(n);
@@ -584,8 +607,15 @@ export function graphDesc(graph) {
     // stop. The same argument applies to the fill: a card named by its ref alone
     // would read as open, since open is what nearly all of them are.
     'A whole dependency chain is drawn whenever at least one pull request in it belongs to the' +
-      ' page author, so some of the cards below are somebody else\'s. Every one that is not the' +
-      ' page author\'s names its author where it is listed; the rest are the page author\'s own.',
+      ' page author' +
+      (hasBots ? ' or to a tracked bot' : '') +
+      ', so some of the cards below are somebody else\'s. Every one that is not the' +
+      ' page author\'s names its author where it is listed; the rest are the page author\'s own.' +
+      (hasBots
+        ? ' A tracked bot\'s pull request is named as one: it is scheduled here like the page' +
+          ' author\'s own work, whereas a card named only as somebody else\'s is on the page' +
+          ' because it stands in the way of work that is.'
+        : ''),
     'The fill colour of a card is the state of that pull request, and every card also prints that' +
       ' state as a word beside its reference, so nothing here is carried by colour alone. Open is' +
       ' the usual case and is left unmarked below; anything else is named in brackets after the' +
@@ -810,7 +840,8 @@ export function graphSvg(graph, ids = {}) {
       ? inner.join('')
       : `<a href="${esc(n.url)}" target="_blank" rel="noopener">${inner.join('')}</a>`;
     out.push(
-      `<g class="node ${n.kind === 'own' ? 'own' : 'dep'} ${c.state.cls}">` +
+      `<g class="node ${n.kind === 'bot' ? 'bot' : n.kind === 'own' ? 'own' : 'dep'} ` +
+        `${c.state.cls}">` +
         `<title>${esc(nodeTitleText(n))}</title>${body}</g>`
     );
   }
@@ -848,6 +879,13 @@ svg.depgraph .st-closed .st{fill:var(--state-closed-line)}
 /* Not one of the author's own PRs: still filled by its state, but dashed, so
    "whose PR" and "what state" stay two separate channels. */
 svg.depgraph .node.dep .box{stroke-dasharray:4 3}
+/* A TRACKED BOT's open PR: dotted, between the author's solid card and the dashed
+   card of a PR that is merely in the way. The three patterns are one channel with
+   three values -- whose work this is -- and it is the SECOND channel, not the
+   first: every card that is not the page author's also prints the author's handle
+   next to a diamond, so nothing rests on telling one dash pattern from another,
+   and nothing here rests on colour at all. */
+svg.depgraph .node.bot .box{stroke-dasharray:1 3}
 svg.depgraph a{text-decoration:none}
 /* the card: the ref identifies it, the TITLE is what it is */
 svg.depgraph .ref{font:600 10.5px ui-monospace,SFMono-Regular,Menlo,monospace;fill:var(--ink2)}
