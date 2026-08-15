@@ -287,15 +287,29 @@ export function nodeState(n) {
 // foreign card is the outline (dotted, not dashed), which is a second channel and
 // not the one carrying the handle. Nothing here rests on telling one dash pattern
 // from another: the handle is printed.
+// How a blocked-on-abandoned dependency is named on a card. A withheld target
+// keeps its number and loses its repo name here exactly as it does everywhere
+// else: a card that is careful not to print a private repo name must not print
+// one in the reason it is blocked either.
+export const blockedRef = b => (b.hidden ? `#${b.number}` : shortRef(b.repo, b.number));
+
 export function nodeMarks(n, hold) {
   const out = [];
   if (hold) out.push({ role: 'critical', glyph: '⊘', text: hold });
+  // A prerequisite that was closed without merging. The card it pointed at is
+  // NOT drawn -- nobody will merge it, so putting it in the merge order would
+  // assert an order that cannot happen -- and this mark is what stops the
+  // dependent reading as ready just because no arrow arrives at it.
+  if (n.blockedBy && n.blockedBy.length) {
+    const refs = n.blockedBy.map(blockedRef).join(', ');
+    out.push({ role: 'critical', glyph: '⊗', text: `blocked: ${refs} closed unmerged` });
+  }
   if (n.hidden) out.push({ role: 'foreign', glyph: '◇', text: 'private repo' });
   else if (n.kind !== 'own') {
     if (!n.author) out.push({ role: 'foreign', glyph: '?', text: 'author unknown' });
     else if (n.foreign) out.push({ role: 'foreign', glyph: '◇', text: `@${n.author}` });
   }
-  return out.slice(0, 2);
+  return out.slice(0, 3);
 }
 
 // Everything drawn inside one card, and how tall that makes it.
@@ -365,6 +379,12 @@ export function nodeTitleText(n) {
         : 'already merged, but release-gated: the merge landed and the gate has not opened, so it is still in the way'
     );
   if (n.status) bits.push(n.status);
+  if (n.blockedBy && n.blockedBy.length) {
+    bits.push(
+      `blocked on ${n.blockedBy.map(blockedRef).join(', ')}, closed without merging — nothing will` +
+        ' merge that, so this cannot proceed as declared'
+    );
+  }
 
   const live = (n.needs || []).filter(e => !e.cycle);
   const out = (n.neededBy || []).filter(e => !e.cycle);
@@ -484,6 +504,21 @@ export function layoutGraph(graph) {
   // these do not have. A card with no readable date -- an unreadable target, or a
   // withheld one, whose date is blanked with its name -- sinks below the dated
   // ones rather than claiming a position, and is then settled by `plain`.
+  // DRAFTS SINK, and they sink UNDER the crossing keys and OVER recency.
+  //
+  // A draft is not ready to be looked at, so it belongs below the work that is;
+  // but it is still a real node with real edges, so this must never override a
+  // positional constraint. It is layered as the second-to-last key for exactly
+  // that reason: a draft something depends on is still placed by `waitedOnBy` or
+  // `barycentre` first and can still lead its column, the same way an old merged
+  // prerequisite does.
+  //
+  // Among the drafts themselves the newest-first order still applies, so the
+  // rule reads the same on both sides of the split rather than leaving drafts in
+  // whatever order they happened to arrive in.
+  const draftLast = (a, b) =>
+    Number(a.state === 'draft') - Number(b.state === 'draft');
+
   const opened = n => (n.createdAt ? Date.parse(n.createdAt) : NaN);
   const recent = (a, b) => {
     const ta = opened(a);
@@ -496,10 +531,14 @@ export function layoutGraph(graph) {
     return tb - ta || plain(a, b);
   };
 
+  // The whole tiebreak, in the order Wan asked for it: non-drafts before drafts,
+  // then newest first, then repo and number to make it total.
+  const settle = (a, b) => draftLast(a, b) || recent(a, b);
+
   // Provisional order per rank, used only to seed the pass below.
   const prov = ranks.map(list => {
     const m = new Map();
-    [...list].sort(recent).forEach((n, i) => m.set(n.key, i));
+    [...list].sort(settle).forEach((n, i) => m.set(n.key, i));
     return m;
   });
 
@@ -529,14 +568,14 @@ export function layoutGraph(graph) {
         if (ba !== null && bb !== null && ba !== bb) return ba - bb;
         if (ba !== null && bb === null) return -1;
         if (ba === null && bb !== null) return 1;
-        return recent(a, b);
+        return settle(a, b);
       }
       const ua = waitedOnBy(a);
       const ub = waitedOnBy(b);
-      if (ua === null && ub === null) return recent(a, b);
+      if (ua === null && ub === null) return settle(a, b);
       if (ua === null) return 1;
       if (ub === null) return -1;
-      return ua - ub || recent(a, b);
+      return ua - ub || settle(a, b);
     });
 
     // One rank, one column, however tall. See the header of this file.
@@ -658,6 +697,7 @@ export function graphDesc(graph) {
   for (const list of ranks) list.sort((a, b) => (a.y || 0) - (b.y || 0) || a.number - b.number);
   const total = ranks.length;
 
+  const blocked = graph.nodes.filter(n => n.blockedBy && n.blockedBy.length);
   const parts = [
     'Each pull request is drawn exactly once, as a card carrying its repository, its number and' +
       ' its title.',
@@ -692,6 +732,24 @@ export function graphDesc(graph) {
       ' landed.',
     'The whole structure follows, in words.'
   ];
+  // Said before the column list, like the merged set is, because a reader who is
+  // not looking at the picture would otherwise meet a pull request with nothing
+  // to its left and conclude it was ready.
+  if (blocked.length) {
+    parts.splice(
+      parts.length - 1,
+      0,
+      `${blocked.length} pull request${blocked.length === 1 ? '' : 's'} here declare${
+        blocked.length === 1 ? 's' : ''
+      } a prerequisite that was closed without being merged: ` +
+        blocked
+          .map(n => `${descRef(n)} waits on ${n.blockedBy.map(blockedRef).join(', ')}`)
+          .join('; ') +
+        '. Those prerequisites are not drawn, because nothing will merge them and a merge order' +
+        ' that cannot happen is not merge order; the pull requests waiting on them cannot proceed' +
+        ' as declared.'
+    );
+  }
   // The merged cards, named as a set. A reader who is not looking at the picture
   // needs to know that some of what follows is finished work and why it is here
   // at all, before they read a column list that mixes the two.

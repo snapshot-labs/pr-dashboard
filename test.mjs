@@ -17,6 +17,8 @@ import {
   prRecord,
   redactPrivate,
   resolveDeps,
+  seedRecords,
+  seedable,
   resolveStatus
 } from './build.mjs';
 import {
@@ -2446,6 +2448,131 @@ await t('a merged prerequisite sorts by its own open date, like every other card
   assert.deepEqual(rank0, [400, 2, 3], 'opened in July, so it leads a column of June and May');
 });
 
+
+// --- a prerequisite that was CLOSED WITHOUT MERGING ------------------------
+//
+// Merged and closed-unmerged are two different facts. The page said so on a card
+// and did not act on it: a closed target got a card and an arrow, asserting a
+// merge order that can never happen. Now the card is not drawn, the dependent is
+// marked, and the page names what it declined to draw.
+console.log('a closed-unmerged prerequisite is not merge order');
+const deadEdge = (n, over = {}) =>
+  edge(S, n, { targetState: 'closed', status: 'closed unmerged', merged: false, satisfied: false, ...over });
+
+await t('a closed-unmerged prerequisite gets NO card and NO arrow', () => {
+  const g = buildGraph([sp(491, [deadEdge(457)])]);
+  assert.equal(at(g, `${S}#457`), undefined, 'not a node');
+  assert.equal(g.edges.length, 0, 'and not an edge either');
+  assert.deepEqual(g.nodes.map(n => n.number), [491]);
+});
+await t('...but a MERGED one still is, which is the whole distinction', () => {
+  const g = buildGraph([sp(491, [mergedEdge(S, 457)])]);
+  assert.ok(at(g, `${S}#457`), 'a wait that is over is real merge-order information');
+  assert.equal(g.edges.length, 1);
+  assert.equal(at(g, `${S}#457`).state, 'merged');
+});
+await t('the DEPENDENT is marked blocked, so it cannot read as ready', () => {
+  // Dropping the edge and saying nothing would be worse than the bug: a card
+  // with no arrow arriving at it reads as ready to merge.
+  const g = buildGraph([sp(491, [deadEdge(457)])]);
+  const n = at(g, `${S}#491`);
+  assert.deepEqual(n.blockedBy.map(b => b.number), [457]);
+  const html = page(g);
+  assert.match(html, /<tspan class="g">⊗<\/tspan> blocked: stamp#457 closed unmerged<\/text>/);
+  assert.match(html, /blocked on stamp#457, closed without merging/, 'and in the hover text');
+  assert.match(html, /<span class="k crit">⊗<\/span> waits on a PR that was closed without merging/, 'legend');
+});
+await t('the page NAMES what it declined to draw, with the count while shut', () => {
+  const html = page(buildGraph([sp(491, [deadEdge(457)])]));
+  assert.match(html, /<summary>1 declared prerequisite was closed without merging<\/summary>/);
+  assert.match(fold(html), /1 declared prerequisite was closed without merging/, 'legible while shut');
+  assert.match(html, /Nothing declared is dropped in silence/);
+});
+await t('the text alternative says it too, before the column list', () => {
+  const g = buildGraph([sp(491, [deadEdge(457)])]);
+  layoutGraph(g);
+  const desc = graphDesc(g);
+  assert.match(desc, /declares a prerequisite that was closed without being merged/);
+  assert.match(desc, /stamp#491 waits on stamp#457/);
+  assert.match(desc, /a merge order that cannot happen is not merge order/);
+});
+await t('a WITHHELD closed prerequisite is named by number and never by repo', () => {
+  const g = buildGraph([sp(491, [deadEdge(86, { hidden: true, repo: 'snapshot-labs/a-private-repo' })])]);
+  const html = page(g);
+  assert.match(html, /blocked: #86 closed unmerged/, 'the number, and nothing else');
+  assert.doesNotMatch(html, /a-private-repo/, 'the repo name never appears');
+});
+await t('an abandoned note for a PRUNED card goes with it', () => {
+  // A note about a card that is not on the page is not a note about anything.
+  const g = buildGraph([pr(1, 'tony8713'), pr(900, 'wa0x6e', [{ number: 457, targetState: 'closed', status: 'closed unmerged' }])], mine);
+  assert.deepEqual(g.nodes.map(n => n.number), [1]);
+  assert.deepEqual(g.abandoned, [], 'dropped with the component that carried it');
+});
+await t('seedRecords() actually DROPS them: the guard is wired, not just present', () => {
+  // The mutation that survived the first time round. seedable() being correct is
+  // worth nothing if main() never calls it, so this exercises the split itself.
+  const rec = (number, state) => ({ key: `${S}#${number}`, repo: S, number, state });
+  const { seed, stale } = seedRecords([
+    rec(1, 'open'), rec(2, 'closed'), rec(3, 'draft'), rec(4, 'merged'), rec(5, 'unknown')
+  ]);
+  assert.deepEqual(seed.map(r => r.number), [1, 3], 'only open and draft survive');
+  assert.deepEqual(stale, [`${S}#2 (closed)`, `${S}#4 (merged)`, `${S}#5 (unknown)`]);
+  assert.deepEqual(seedRecords([]).seed, []);
+  assert.deepEqual(seedRecords(null).stale, []);
+});
+await t('seedable(): the payload decides, not the search string', () => {
+  // Both real holes, in one assertion each. A closed PR came back from an
+  // `is:open` search and was drawn; a merged one did the same and FAILED the
+  // build on mergedNonPrerequisites().
+  assert.equal(seedable({ state: 'open' }), true);
+  assert.equal(seedable({ state: 'draft' }), true);
+  assert.equal(seedable({ state: 'closed' }), false);
+  assert.equal(seedable({ state: 'merged' }), false);
+  assert.equal(seedable({ state: 'unknown' }), false);
+  assert.equal(seedable(null), false);
+});
+
+// --- drafts sink ----------------------------------------------------------
+console.log('drafts sort below non-drafts, under the crossing keys');
+const dr = (number, iso) => ({ ...dated(number, iso), state: 'draft', draft: true });
+
+await t('a draft sorts below a non-draft, whatever the dates say', () => {
+  const g = buildGraph([dr(1, '2026-08-01T00:00:00Z'), dated(2, '2026-01-01T00:00:00Z')]);
+  assert.deepEqual(colOrder(g), [2, 1], 'the older non-draft still leads');
+});
+await t('among the drafts themselves, newest first still holds', () => {
+  const g = buildGraph([dr(1, '2026-01-01T00:00:00Z'), dr(2, '2026-08-01T00:00:00Z'), dated(3, '2026-02-01T00:00:00Z')]);
+  assert.deepEqual(colOrder(g), [3, 2, 1]);
+});
+await t('a draft something DEPENDS ON still leads its column: position beats sinking', () => {
+  // The constraint Wan named. #15 is a draft and the oldest thing here, and it
+  // still leads, because the crossing key decides before draft-versus-not.
+  const many = Array.from({ length: 5 }, (_, i) => dated(i + 10, `2026-0${i + 2}-01T00:00:00Z`));
+  const g = buildGraph([...many, dr(15, '2020-01-01T00:00:00Z'), sp(1, [edge(S, 15)])]);
+  layoutGraph(g);
+  assert.equal(at(g, `${S}#15`).slot, 0, 'a draft can still be placed by the graph');
+});
+
+await t('BOTH CHANGES TOGETHER: a closed prereq goes, a draft sinks, neither eats the other', () => {
+  // The interaction worth pinning: the closed-prerequisite fix removes a NODE
+  // and the draft rule reorders the ones that remain, so a bug in either could
+  // look like a bug in the other.
+  const g = buildGraph([
+    dated(491, '2026-07-01T00:00:00Z', { deps: [deadEdge(457)] }), // blocked on an abandoned PR
+    dr(600, '2026-09-01T00:00:00Z'),               // newest, but a draft
+    dated(700, '2026-03-01T00:00:00Z'),            // oldest non-draft
+    { ...dated(800, '2026-08-01T00:00:00Z') }      // newer non-draft
+  ]);
+  assert.equal(at(g, `${S}#457`), undefined, 'the abandoned prerequisite is gone');
+  assert.deepEqual(g.abandoned.map(a => a.number), [457], 'and is accounted for, not lost');
+  // Aug, Jul, Mar, then the draft -- which is the newest of the four and still last.
+  assert.deepEqual(colOrder(g), [800, 491, 700, 600], 'non-drafts newest-first, draft last');
+  assert.deepEqual(at(g, `${S}#491`).blockedBy.map(b => b.number), [457], 'the mark survived the sort');
+  const html = page(g);
+  assert.match(html, /blocked: stamp#457 closed unmerged/);
+  assert.match(html, /<summary>1 declared prerequisite was closed without merging<\/summary>/);
+});
+
 console.log('the legend and the text alternative say what the fill means');
 await t('open, draft and merged are always keyed, with swatch and glyph and word', () => {
   const html = page(buildGraph([sp(504)]));
@@ -2455,12 +2582,19 @@ await t('open, draft and merged are always keyed, with swatch and glyph and word
   assert.match(html, /<span class="sw st-merged">●<\/span>merged — a prerequisite that has already landed<\/span>/);
   assert.match(html, /The colour a card is filled with is the state of that PR/, 'and the banner');
 });
-await t('closed is keyed only when something on the page is closed', () => {
+await t('a CLOSED prerequisite is no longer drawn, so nothing keys the closed fill', () => {
+  // This test used to assert the opposite: that a closed-unmerged dependency
+  // target got a card and put `✕ closed` in the fill key. That was the bug. A
+  // merged prerequisite records a wait that is OVER; a closed one records a wait
+  // that will never end, and drawing it to the left of its dependent asserts a
+  // merge order that cannot happen. The card is gone and the dependent is marked
+  // instead -- see the blocked-on-abandoned block above.
   assert.doesNotMatch(page(buildGraph([sp(504)])), /class="sw st-closed"/);
   const dead = buildGraph([
     sp(491, [edge(S, 457, { targetState: 'closed', status: 'closed unmerged' })])
   ]);
-  assert.match(page(dead), /<span class="sw st-closed">✕<\/span>closed/);
+  assert.doesNotMatch(page(dead), /class="sw st-closed"/, 'no closed card, so no closed key');
+  assert.equal(at(dead, `${S}#457`), undefined, 'and no card for it at all');
 });
 await t('the <desc> explains the fill and names every state that is not open', () => {
   // With the per-PR list gone, this IS the text form of the page.

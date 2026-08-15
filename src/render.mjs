@@ -122,6 +122,34 @@ export function render({
   // in the summary rather than inside the block. This notice exists so the page
   // admits it is not showing everything; an admission that only appears once you
   // open something is not one, so the number stays legible while shut.
+  // A declared prerequisite that was closed without merging. Folded like the
+  // cut-edge note and, like it, with the COUNT in the summary: what this block
+  // reports is work that cannot proceed, and a reader who never opens it must
+  // still learn that the graph is short of an edge on purpose.
+  const dead = graph.abandoned || [];
+  const deadNote = dead.length
+    ? `<details class="fold crit">
+<summary>${dead.length} declared prerequisite${
+        dead.length === 1 ? ' was' : 's were'
+      } closed without merging</summary>
+<p><strong>${dead.length} pull request${dead.length === 1 ? '' : 's'} here declare${
+        dead.length === 1 ? 's' : ''
+      } a prerequisite that was closed without being merged.</strong>
+      Those prerequisites are <em>not</em> drawn. A merged prerequisite is kept because it records a
+      wait that is <em>over</em>; a closed one records a wait that will never end, and drawing it to
+      the left of its dependent would assert a merge order that cannot happen. The dependent is
+      marked <code>⊗ blocked</code> instead, because a card with no arrow arriving at it otherwise
+      reads as ready:
+      ${dead
+        .map(
+          a =>
+            `<code>${esc(a.to.hidden ? `#${a.to.number}` : a.to.key)}</code> waits on
+             <code>${esc(a.hidden ? `#${a.number}` : `${a.repo}#${a.number}`)}</code>`
+        )
+        .join('; ')}. Nothing declared is dropped in silence.</p>
+</details>`
+    : '';
+
   const n = withheld.count;
   const many = n > 1;
   const withheldNote = n
@@ -268,6 +296,7 @@ ${fillLegend}
   }
 <span><span class="k">◇ @handle</span> whose PR it is, when it is not ${esc(author)}'s to merge</span>
 <span><span class="k crit">⊘</span> the PR's own title says do not merge</span>
+<span><span class="k crit">⊗</span> waits on a PR that was closed without merging</span>
 <span><span class="k gate">GATED</span> release-gated: a published release, not just a merge</span>
 <span><span class="k met">✓ MET</span> that prerequisite has already landed</span>
 </p>
@@ -334,6 +363,7 @@ the full title and the edges it sits on.</p>
 </details>
 
 ${cutNote}
+${deadNote}
 ${withheldNote}
 
 <details class="fold">

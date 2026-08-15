@@ -513,12 +513,20 @@ async function main() {
   // --- my own open PRs: the seed ----------------------------------------
   for (const r of new Set(found.map(i => i.repository_url.split('/repos/')[1]))) await loadRepo(r);
 
-  const seed = [];
+  const fetched = [];
   for (const item of found) {
     const repo = item.repository_url.split('/repos/')[1];
     const full = await getPr(repo, item.number);
     if (!full) continue;
-    seed.push(prRecord(full, repo, repoMeta.get(repo)));
+    fetched.push(prRecord(full, repo, repoMeta.get(repo)));
+  }
+  // The search said open; the payload is what actually decides. See seedRecords().
+  const { seed, stale } = seedRecords(fetched);
+  if (stale.length) {
+    console.log(
+      `seed: ${stale.length} PR(s) came back from an \`is:open\` search but are no longer ` +
+        `open, so they are not drawn: ${stale.join(', ')}`
+    );
   }
   seed.sort((a, b) => a.repo.localeCompare(b.repo) || a.number - b.number);
 
@@ -711,6 +719,13 @@ async function main() {
     'card fill: ' +
       PR_STATES.map(st => `${st} ${graph.nodes.filter(n => n.state === st).length}`).join(', ')
   );
+  for (const a of graph.abandoned) {
+    console.log(
+      `not drawn, a declared prerequisite was closed without merging: ${a.to.key} -> ` +
+        `${a.hidden ? `#${a.number}` : `${a.repo}#${a.number}`} ` +
+        `(the dependent is marked blocked instead)`
+    );
+  }
   const tracked = TRACKED_AUTHORS.join(' or ');
   console.log(
     `components: ${componentsOf(graph.nodes).length} drawn, each holding at least one PR by ` +
@@ -808,6 +823,40 @@ export async function collectAvatars(nodes, fetchAvatar) {
     n.avatarId = rec && rec.id ? rec.id : null;
   }
   return defs;
+}
+
+// WHAT STATE A CARD OF ITS OWN MAY BE IN.
+//
+// This page lists OPEN pull requests. Every query it seeds from says so -- the
+// search is `is:pr is:open`, the sweep reads a repo's open PRs -- so in principle
+// nothing else can arrive as a card of its own. In practice two things get past
+// that, and both were live holes:
+//
+//   GitHub's SEARCH INDEX LAGS. A PR closed or merged seconds ago still comes
+//   back from `is:open` for a while. The build then fetches the full payload,
+//   which tells the truth, and believes the search string instead. A merged one
+//   arriving this way trips mergedNonPrerequisites() and FAILS the build, which
+//   is what aborted a publish earlier; a closed one trips nothing at all and is
+//   simply drawn, as a full card, as though it were still work to do.
+//
+// The payload wins. It is the later and more specific fact, and it is the one
+// the card is filled from anyway. Anything not open-or-draft is dropped from the
+// seed and named in the log rather than silently discarded.
+export const SEEDABLE_STATES = ['open', 'draft'];
+export const seedable = rec => SEEDABLE_STATES.includes(rec && rec.state);
+
+// Split what the search returned into what may actually be drawn and what has
+// moved on since the index was written. Separated from main() so the WIRING is
+// testable and not just the predicate: a guard that is never called is the same
+// as no guard, and the first version of this was exactly that.
+export function seedRecords(records) {
+  const seed = [];
+  const stale = [];
+  for (const rec of records || []) {
+    if (seedable(rec)) seed.push(rec);
+    else stale.push(`${rec.key} (${rec.state})`);
+  }
+  return { seed, stale };
 }
 
 // Is a prerequisite already met?
@@ -996,7 +1045,37 @@ export function buildGraph(prs, mine = () => true, trail = [], bot = () => false
   }
 
   const edges = [];
+  // A dependency on a pull request that was CLOSED WITHOUT MERGING.
+  //
+  // Merged and closed-unmerged are two different facts and this page has always
+  // said so on a card; it did not act on the difference. A merged prerequisite is
+  // drawn because it is a wait that is OVER: real merge-order information. A
+  // closed-unmerged one is a wait that will never end. Nobody is going to merge
+  // it, so drawing it to the LEFT of its dependent asserts a merge order that
+  // cannot happen -- the same objection the merged-trail rule already makes to
+  // following a merged PR's declaration to a target that is still open.
+  //
+  // So the card is not drawn and the edge is not drawn. What replaces them is
+  // louder, not quieter: the DEPENDENT is marked `⊗ blocked` on its own card,
+  // says so in its hover text and in the <desc>, and the page carries a fold
+  // naming every one of them with the count in the summary. Dropping the edge and
+  // saying nothing would be the worst of the three options, because a card with
+  // no arrow arriving at it reads as ready to merge, and this one is the opposite
+  // of ready.
+  const abandoned = [];
+  const isAbandoned = d =>
+    Boolean(d) && !d.merged && (d.targetState === 'closed' || d.status === 'closed unmerged');
+
   const attach = (to, d) => {
+    if (isAbandoned(d)) {
+      abandoned.push({ to, repo: d.repo, number: d.number, url: d.url, hidden: Boolean(d.hidden) });
+      (to.blockedBy ||= []).push({
+        repo: d.repo,
+        number: d.number,
+        hidden: Boolean(d.hidden)
+      });
+      return null;
+    }
     {
       const tk = K(d.repo, d.number);
       // The heart of it: if the target is already a node -- because it is one of
@@ -1074,7 +1153,14 @@ export function buildGraph(prs, mine = () => true, trail = [], bot = () => false
   }
 
   const graph = { nodes, edges, byKey };
+  // Carried on the graph so the page can name what it declined to draw, exactly
+  // as `pruned` and the cycle-cut edges are. Nothing declared is dropped in
+  // silence.
+  graph.abandoned = abandoned;
   graph.pruned = pruneComponents(graph, login => mine(login) || bot(login));
+  // A note about a card that is no longer on the page is not a note about
+  // anything. Filtered AFTER pruning for that reason.
+  graph.abandoned = graph.abandoned.filter(a => byKey.has(a.to.key));
   rankNodes(graph);
   return graph;
 }
