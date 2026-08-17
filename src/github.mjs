@@ -177,10 +177,52 @@ export async function getAvatar(url, size = 48) {
   return out;
 }
 
+async function releasesViaGraphql(repo) {
+  const [owner, name] = repo.split('/');
+  const query =
+    'query($owner:String!,$name:String!){repository(owner:$owner,name:$name)' +
+    '{releases(first:100,orderBy:{field:CREATED_AT,direction:DESC})' +
+    '{nodes{tagName publishedAt isDraft isPrerelease url}}}}';
+  const res = await fetch(`${API}/graphql`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: 'application/vnd.github+json',
+      'user-agent': 'snapshot-labs-pr-dashboard',
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({ query, variables: { owner, name } })
+  });
+  calls++;
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText} on ${API}/graphql for ${repo}`);
+  const body = await res.json();
+  if (body.errors && body.errors.length)
+    throw new Error(`graphql refused the releases of ${repo}: ${body.errors.map(e => e.message).join('; ')}`);
+  const nodes = ((body.data || {}).repository || {}).releases;
+  return ((nodes && nodes.nodes) || []).map(n => ({
+    tag_name: n.tagName,
+    published_at: n.publishedAt,
+    html_url: n.url,
+    draft: n.isDraft,
+    prerelease: n.isPrerelease
+  }));
+}
+
 const releaseCache = new Map();
 export async function getReleases(repo) {
   if (releaseCache.has(repo)) return releaseCache.get(repo);
-  const d = (await api(`/repos/${repo}/releases?per_page=30`, { allow404: true })) || [];
+  let d = (await api(`/repos/${repo}/releases?per_page=30`, { allow404: true })) || [];
+  if (!d.length) {
+    const latest = await api(`/repos/${repo}/releases/latest`, { allow404: true });
+    if (latest && latest.published_at) {
+      d = await releasesViaGraphql(repo);
+      if (!d.length)
+        throw new Error(
+          `${repo}: the releases list came back empty while ${latest.tag_name} ` +
+            `(${latest.published_at}) is published. Refusing to call that "no releases".`
+        );
+    }
+  }
   const rels = d
     .filter(r => !r.draft && !r.prerelease)
     .map(r => ({ tag: r.tag_name, publishedAt: r.published_at, url: r.html_url }))

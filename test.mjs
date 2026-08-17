@@ -2821,6 +2821,82 @@ await t('and with nothing published since the merge it still awaits a release', 
   assert.equal(r.latestRelease.tag, 'v0.16.0', 'the newest release, which this merge missed');
 });
 
+console.log('an empty releases list is checked before it is believed');
+
+const releaseNode = (tag, publishedAt) => ({
+  tagName: tag,
+  publishedAt,
+  isDraft: false,
+  isPrerelease: false,
+  url: `https://github.com/fake/repo/releases/tag/${tag}`
+});
+const withBlankReleaseList = async (latest, nodes, fn) => {
+  const real = globalThis.fetch;
+  globalThis.fetch = async url => {
+    const u = String(url);
+    if (/\/releases\/latest$/.test(u)) return latest ? respond(latest) : missing;
+    if (/\/releases\?/.test(u)) return respond([]);
+    if (/\/graphql$/.test(u)) {
+      if (!nodes) throw new Error('graphql was consulted and should not have been');
+      return respond({ data: { repository: { releases: { nodes } } } });
+    }
+    throw new Error(`the fake GitHub was asked for something it does not serve: ${u}`);
+  };
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = real;
+  }
+};
+const latestIsShipped = {
+  tag_name: 'v0.16.0',
+  published_at: '2026-08-14T10:38:34Z',
+  draft: false,
+  prerelease: false
+};
+
+await t('a blank list is not "no releases" when one is published, and the tag survives', async () => {
+  const r = await withBlankReleaseList(
+    latestIsShipped,
+    [
+      releaseNode('v0.16.0', '2026-08-14T10:38:34Z'),
+      releaseNode('v0.15.2', '2026-08-13T14:52:21Z'),
+      releaseNode('v0.15.1', '2026-08-06T11:50:11Z')
+    ],
+    () =>
+      resolveStatus(
+        { repo: 'fake/blank-list', needsRelease: true },
+        { merged_at: '2026-08-06T11:47:58Z', state: 'closed' }
+      )
+  );
+  assert.equal(r.satisfied, true, 'it shipped three minutes after the merge');
+  assert.equal(r.status, 'released in v0.15.1', 'and the earliest release after it is still named');
+});
+
+await t('a repo that has never released still just awaits one, and nothing else is asked', async () => {
+  const r = await withBlankReleaseList(null, null, () =>
+    resolveStatus(
+      { repo: 'fake/never-released', needsRelease: true },
+      { merged_at: '2026-08-06T11:47:58Z', state: 'closed' }
+    )
+  );
+  assert.equal(r.satisfied, false);
+  assert.equal(r.status, 'merged, awaiting release');
+});
+
+await t('a list that stays blank stops the build instead of reporting no releases', async () => {
+  await assert.rejects(
+    () =>
+      withBlankReleaseList(latestIsShipped, [], () =>
+        resolveStatus(
+          { repo: 'fake/blank-twice', needsRelease: true },
+          { merged_at: '2026-08-06T11:47:58Z', state: 'closed' }
+        )
+      ),
+    /fake\/blank-twice.*v0\.16\.0/s
+  );
+});
+
 if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) {
   console.log('release gating (live API)');
   const RJS = 'snapshot-labs/snapshot.js';
