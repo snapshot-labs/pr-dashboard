@@ -177,6 +177,114 @@ export async function getAvatar(url, size = 48) {
   return out;
 }
 
+export async function getReviewInventory(author, org) {
+  const query = `
+    query($query: String!) {
+      search(query: $query, type: ISSUE, first: 100) {
+        issueCount
+        nodes {
+          ... on PullRequest {
+            number
+            reviewDecision
+            headRefOid
+            repository { nameWithOwner }
+            reviewRequests(first: 100) {
+              totalCount
+              nodes {
+                requestedReviewer {
+                  __typename
+                  ... on User { login }
+                  ... on Team { slug }
+                }
+              }
+            }
+            reviews(first: 100) {
+              totalCount
+              nodes {
+                author { login }
+                state
+                submittedAt
+                commit { oid }
+              }
+            }
+            reviewThreads(first: 100) {
+              totalCount
+              nodes {
+                isResolved
+                comments(first: 20) {
+                  totalCount
+                  nodes { author { login } }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+  const res = await fetch(`${API}/graphql`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: 'application/vnd.github+json',
+      'user-agent': 'snapshot-labs-pr-dashboard',
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify({
+      query,
+      variables: { query: `is:pr is:open author:${author} org:${org}` }
+    })
+  });
+  calls++;
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText} on ${API}/graphql for reviews`);
+  const body = await res.json();
+  if (body.errors?.length)
+    throw new Error(`graphql refused reviews: ${body.errors.map(error => error.message).join('; ')}`);
+
+  const search = body.data?.search;
+  const nodes = (search?.nodes || []).filter(node => node?.repository?.nameWithOwner);
+  if ((search?.issueCount || 0) > nodes.length)
+    throw new Error(`review inventory was truncated at ${nodes.length} of ${search.issueCount} PRs`);
+
+  const complete = (connection, label) => {
+    if ((connection?.totalCount || 0) > (connection?.nodes || []).length)
+      throw new Error(`${label} was truncated at ${(connection?.nodes || []).length} of ${connection.totalCount}`);
+    return connection?.nodes || [];
+  };
+
+  return nodes.map(node => {
+    const key = `${node.repository.nameWithOwner}#${node.number}`;
+    const requests = complete(node.reviewRequests, `${key} review requests`);
+    const reviews = complete(node.reviews, `${key} reviews`);
+    const threads = complete(node.reviewThreads, `${key} review threads`);
+    return {
+      key,
+      reviewDecision: node.reviewDecision,
+      headSha: node.headRefOid,
+      reviewRequests: requests
+        .map(request => request.requestedReviewer)
+        .filter(Boolean)
+        .map(request => ({
+          kind: request.__typename,
+          login: request.login || null,
+          slug: request.slug || null
+        })),
+      reviews: reviews.map(review => ({
+        author: review.author?.login || null,
+        state: review.state,
+        submittedAt: review.submittedAt,
+        commitSha: review.commit?.oid || null
+      })),
+      threads: threads.map((thread, index) => ({
+        isResolved: thread.isResolved,
+        comments: complete(thread.comments, `${key} thread ${index + 1} comments`).map(comment => ({
+          author: comment.author?.login || null
+        }))
+      }))
+    };
+  });
+}
+
 async function releasesViaGraphql(repo) {
   const [owner, name] = repo.split('/');
   const query =

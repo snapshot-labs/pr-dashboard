@@ -92,6 +92,7 @@ import {
   getPr,
   getReleases,
   getRepo,
+  getReviewInventory,
   openPrsInRepo,
   searchOpenPrs
 } from './src/github.mjs';
@@ -100,11 +101,13 @@ import { classify } from './src/ci.mjs';
 import { openPrState, PR_STATES, prState } from './src/state.mjs';
 import { layoutGraph, shortRef } from './src/graph.mjs';
 import { render } from './src/render.mjs';
+import { reviewQueues } from './src/reviews.mjs';
 
 export { shortRef };
 
 const AUTHOR = process.env.PR_AUTHOR || 'tony8713';
 const ORG = process.env.PR_ORG || 'snapshot-labs';
+const REVIEWER = process.env.PR_REVIEWER || 'wa0x6e';
 
 // TRACKED AUTHORS: whose open PRs SEED this page.
 //
@@ -680,6 +683,12 @@ async function main() {
   // is why it is scoped to DRAWN nodes rather than to the pool.
   const drawnMine = graph.nodes.filter(n => n.kind === 'own').map(n => n.pr);
   const drawnBot = graph.nodes.filter(n => n.kind === 'bot').map(n => n.pr);
+  const reviewInventory = await getReviewInventory(AUTHOR, ORG);
+  const workflow = reviewQueues(drawnMine, reviewInventory, AUTHOR, REVIEWER);
+  console.log(
+    `review handoff: ${workflow.waitingForWan.length} waiting for @${REVIEWER}, ` +
+      `${workflow.needsTony.length} need ${AUTHOR} to address feedback`
+  );
   for (const pr of [...drawnMine, ...drawnBot]) {
     const prChecks = await getChecks(pr.repo, pr.headSha);
     const baseSha = await getBranchHead(pr.repo, pr.base);
@@ -769,7 +778,9 @@ async function main() {
     withheld,
     total: drawnMine.length,
     bots: BOT_AUTHORS,
-    botTotal: drawnBot.length
+    botTotal: drawnBot.length,
+    workflow,
+    reviewer: REVIEWER
   });
   writeFileSync('dist/index.html', html);
   console.log(`wrote dist/index.html (${html.length} bytes, ${apiCallCount()} API calls)`);

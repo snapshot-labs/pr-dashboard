@@ -1,9 +1,10 @@
 # pr-dashboard
 
-Open PRs across `snapshot-labs`, drawn as a **dependency graph: one node per PR, however many edges
-that PR is on**. Static HTML, no server, no database, and nothing loaded at runtime: `./publish.sh`
-runs `node build.mjs` and publishes `dist/index.html` when somebody runs it by hand, not on a
-schedule.
+Open PRs across `snapshot-labs`, with a review handoff board and a dependency graph containing one
+node per PR, however many edges that PR is on. Static HTML, no server, no database, and nothing
+loaded at runtime: `./publish.sh` runs `node build.mjs` and publishes `dist/index.html`. On the
+operating server it is called manually and by the five-minute PR poller when one of Tony's PRs opens,
+merges, changes draft state, or moves between review classifications.
 
 ## Which way the graph points
 
@@ -75,6 +76,27 @@ runtime of any kind — the browser opens and shuts these itself, which is the o
 can afford to keep all of this text at all. Nothing is hidden with `display:none`, so stripping the
 stylesheet does not spill the prose back over the drawing; and the graph precedes every collapsed
 block in source order, so even a renderer that showed every block open would show the picture first.
+
+## Review handoff
+
+Two workflow columns sit above the dependency graph. They are not graph ranks and they do not imply
+merge order.
+
+**Waiting for Wan** contains Tony-authored open PRs for which `wa0x6e` is requested, or a dismissed
+approval requires reapproval, provided no current Wan approval satisfies the request and Tony has no
+uncleared feedback on that PR. A resolved changes-requested review does not leave the PR in Tony's
+column once every review thread is resolved and Wan has been requested again. It moves to Waiting
+for Wan instead, even while GitHub's aggregate `reviewDecision` remains stale.
+
+**Tony to address** contains Tony-authored open PRs with an unresolved external review thread, or a
+reviewer's latest deciding review is `CHANGES_REQUESTED` and that reviewer has not been requested
+again. A thread containing only Tony's own notes is not external feedback. This column takes
+precedence, so a PR cannot appear in both workflow columns.
+
+The build reads review requests, the append-only review log and thread-resolution state from one
+GraphQL inventory. Each reviewer's latest deciding state wins; `COMMENTED` does not erase an earlier
+approval or changes request. The workflow board is built only from the same public Tony-authored PR
+records that survived the graph's privacy filter. Private inventory records never reach the renderer.
 
 ## What a card shows
 
@@ -443,7 +465,8 @@ python3 -m http.server -d dist             # look at it
 | Env var | Default | Meaning |
 |---|---|---|
 | `GH_TOKEN` / `GITHUB_TOKEN` | — | required |
-| `PR_AUTHOR` | `tony8713` | whose PRs — "yours", the open-PR count, the unmarked cards |
+| `PR_AUTHOR` | `tony8713` | whose PRs, "yours", the open-PR count, the unmarked cards |
+| `PR_REVIEWER` | `wa0x6e` | whose requested review and reapproval state fills the waiting column |
 | `PR_BOT_AUTHORS` | `chai3-bot` | comma-separated bots whose open PRs are *also* seeded and anchor components; marked, dotted, counted apart. Set to empty for a page with none |
 | `PR_ORG` | `snapshot-labs` | which org |
 | `INCLUDE_PRIVATE` | `false` | render PRs from private repos |

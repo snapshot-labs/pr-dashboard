@@ -39,7 +39,13 @@ import {
   textWidth,
   wrapText
 } from './src/graph.mjs';
-import { render } from './src/render.mjs';
+import { render, renderReviewHandoff } from './src/render.mjs';
+import {
+  classifyReviewState,
+  latestDecisions,
+  reviewQueues,
+  unresolvedFeedback
+} from './src/reviews.mjs';
 import { getAvatar, getPr } from './src/github.mjs';
 import { openPrState, PR_STATES, prState, STATE_GLYPH } from './src/state.mjs';
 
@@ -166,6 +172,164 @@ await t('NEGATIVE: a line that carries on past the number declares nothing', () 
 await t('one target declared twice, in two spellings, is one declaration', () => {
   const d = parseDeclarations('Stacked on o/r#1\nDepends on o/r#1 — and again', 'o/r');
   assert.equal(d.length, 1);
+});
+
+console.log('review handoff classification');
+const reviewState = over => ({
+  key: 'snapshot-labs/stamp#1',
+  reviewDecision: 'REVIEW_REQUIRED',
+  reviewRequests: [],
+  reviews: [],
+  threads: [],
+  ...over
+});
+const submitted = (author, state, minute = 0) => ({
+  author,
+  state,
+  submittedAt: `2026-08-19T12:${String(minute).padStart(2, '0')}:00Z`
+});
+const requested = login => ({ kind: 'User', login, slug: null });
+
+await t('latest deciding review wins while COMMENTED leaves the verdict intact', () => {
+  const latest = latestDecisions([
+    submitted('wa0x6e', 'CHANGES_REQUESTED', 1),
+    submitted('wa0x6e', 'COMMENTED', 2),
+    submitted('wa0x6e', 'APPROVED', 3)
+  ]);
+  assert.equal(latest.get('wa0x6e').state, 'APPROVED');
+});
+await t('a Wan review request with no current approval waits for Wan', () => {
+  const result = classifyReviewState(reviewState({ reviewRequests: [requested('wa0x6e')] }));
+  assert.equal(result.waitingForReview, true);
+  assert.equal(result.needsAddressing, false);
+  assert.equal(result.waitingReason, 'review requested');
+});
+await t('a current Wan approval clears the waiting column', () => {
+  const result = classifyReviewState(
+    reviewState({
+      reviewRequests: [requested('wa0x6e')],
+      reviews: [submitted('wa0x6e', 'APPROVED', 1)]
+    })
+  );
+  assert.equal(result.reviewerApproved, true);
+  assert.equal(result.waitingForReview, false);
+});
+await t('unresolved external feedback needs Tony even when Wan is requested', () => {
+  const result = classifyReviewState(
+    reviewState({
+      reviewRequests: [requested('wa0x6e')],
+      threads: [{ isResolved: false, comments: [{ author: 'wa0x6e' }] }]
+    })
+  );
+  assert.equal(result.needsAddressing, true);
+  assert.equal(result.waitingForReview, false);
+  assert.equal(result.addressingReason, '1 unresolved review thread');
+});
+await t('Tony-only unresolved notes are not review feedback', () => {
+  const pr = reviewState({
+    threads: [{ isResolved: false, comments: [{ author: 'tony8713' }] }]
+  });
+  assert.equal(unresolvedFeedback(pr, 'tony8713').length, 0);
+  assert.equal(classifyReviewState(pr).needsAddressing, false);
+});
+await t('uncleared CHANGES_REQUESTED needs Tony', () => {
+  const result = classifyReviewState(
+    reviewState({
+      reviewDecision: 'CHANGES_REQUESTED',
+      reviews: [submitted('wa0x6e', 'CHANGES_REQUESTED', 1)]
+    })
+  );
+  assert.equal(result.needsAddressing, true);
+  assert.equal(result.addressingReason, 'changes requested by @wa0x6e');
+});
+await t('resolved threads plus re-review request ignore stale reviewDecision', () => {
+  const result = classifyReviewState(
+    reviewState({
+      reviewDecision: 'CHANGES_REQUESTED',
+      reviewRequests: [requested('wa0x6e')],
+      reviews: [submitted('wa0x6e', 'CHANGES_REQUESTED', 1)],
+      threads: [{ isResolved: true, comments: [{ author: 'wa0x6e' }, { author: 'tony8713' }] }]
+    })
+  );
+  assert.equal(result.needsAddressing, false);
+  assert.equal(result.waitingForReview, true);
+  assert.equal(result.waitingReason, 're-review requested');
+});
+await t('a dismissed Wan approval can require reapproval', () => {
+  const result = classifyReviewState(
+    reviewState({ reviews: [submitted('wa0x6e', 'DISMISSED', 1)] })
+  );
+  assert.equal(result.waitingForReview, true);
+  assert.equal(result.waitingReason, 'reapproval needed');
+});
+await t('workflow queues are disjoint and newest first', () => {
+  const visible = [
+    { key: 'snapshot-labs/stamp#1', repo: 'snapshot-labs/stamp', number: 1, updatedAt: '2026-08-18' },
+    { key: 'snapshot-labs/stamp#2', repo: 'snapshot-labs/stamp', number: 2, updatedAt: '2026-08-19' }
+  ];
+  const inventory = [
+    reviewState({ key: visible[0].key, reviewRequests: [requested('wa0x6e')] }),
+    reviewState({
+      key: visible[1].key,
+      reviewRequests: [requested('wa0x6e')],
+      threads: [{ isResolved: false, comments: [{ author: 'wa0x6e' }] }]
+    })
+  ];
+  const queues = reviewQueues(visible, inventory);
+  assert.deepEqual(queues.waitingForWan.map(item => item.number), [1]);
+  assert.deepEqual(queues.needsTony.map(item => item.number), [2]);
+});
+await t('review handoff renders both meanings and links', () => {
+  const html = renderReviewHandoff({
+    waitingForWan: [
+      {
+        repo: 'snapshot-labs/stamp',
+        number: 1,
+        title: 'Ready to review',
+        url: 'https://github.com/snapshot-labs/stamp/pull/1',
+        waitingReason: 'review requested'
+      }
+    ],
+    needsTony: [
+      {
+        repo: 'snapshot-labs/stamp',
+        number: 2,
+        title: 'Needs a fix',
+        url: 'https://github.com/snapshot-labs/stamp/pull/2',
+        addressingReason: '1 unresolved review thread'
+      }
+    ]
+  });
+  assert.match(html, /Waiting for Wan <span>1<\/span>/);
+  assert.match(html, /Tony to address <span>1<\/span>/);
+  assert.match(html, /reapproval is needed, and no current approval from Wan satisfies it/);
+  assert.match(html, /changes-requested review has not been followed by a re-review request/);
+  assert.match(html, /stamp#1/);
+  assert.match(html, /1 unresolved review thread/);
+  assert.equal(html.split('target="_blank" rel="noopener"').length - 1, 2);
+});
+await t('review handoff cannot render inventory outside the visible public nodes', () => {
+  const visible = [
+    {
+      key: 'snapshot-labs/stamp#1',
+      repo: 'snapshot-labs/stamp',
+      number: 1,
+      title: 'Public',
+      url: 'https://github.com/snapshot-labs/stamp/pull/1'
+    }
+  ];
+  const inventory = [
+    reviewState({ key: visible[0].key, reviewRequests: [requested('wa0x6e')] }),
+    reviewState({
+      key: 'private-customer/secret#9',
+      reviewRequests: [requested('wa0x6e')]
+    })
+  ];
+  const queues = reviewQueues(visible, inventory);
+  assert.equal(queues.waitingForWan.length, 1);
+  const html = renderReviewHandoff(queues);
+  assert.match(html, /stamp#1/);
+  assert.doesNotMatch(html, /private-customer|secret#9/);
 });
 
 console.log('CI attribution');
@@ -1346,7 +1510,8 @@ await t('there is no per-PR listing under the drawing any more', () => {
   assert.doesNotMatch(html, /<ul class="tree/, 'no list');
   assert.doesNotMatch(html, /<div class="pr/, 'no per-PR rows');
   assert.doesNotMatch(html, /<ul class="edges">/, 'no per-PR edge list');
-  assert.doesNotMatch(html, /<h2/, 'no repo headings');
+  assert.equal(occurrences(html, '<h2'), 1, 'the only h2 is the review handoff, not a repo heading');
+  assert.match(html, /<h2 id="handoff-title">Review handoff<\/h2>/);
   assert.doesNotMatch(html, /class="badge/, 'and none of the badges those rows carried');
   assert.doesNotMatch(html, /The list below is not a running order/);
   assert.doesNotMatch(html, /listed by number, not in merge order/);
@@ -1596,8 +1761,8 @@ await t('the prose competing with the drawing is a fraction of what it was', () 
   // the key to the marks, and four summaries.
   const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
   const words = visibleWords(html);
-  assert.ok(words < 200, `${words} visible words`);
-  assert.ok(words > 60, `${words} visible words -- the legend must not have been gutted either`);
+  assert.ok(words < 270, `${words} visible words`);
+  assert.ok(words > 100, `${words} visible words -- the workflow board and legend must survive`);
 });
 
 console.log('with the list gone, the SVG is the text alternative');
@@ -1842,7 +2007,7 @@ await t('a PR the COMPONENT rule pulls in from a private repo is redacted the sa
   // Privacy does not care how it got here: from a private repo it is a number,
   // with no title, no author, no repo name and no link.
   const P = 'snapshot-labs/a-private-repo';
-  const secret = pr(86, 'wa0x6e', [], P);
+  const secret = pr(86, 'private-contributor', [], P);
   secret.title = 'secret work about the acme launch';
   secret.body = 'Depends on #999 — because of the secret thing';
   secret.base = 'feat/secret-branch';
@@ -1855,7 +2020,7 @@ await t('a PR the COMPONENT rule pulls in from a private repo is redacted the sa
   const html = page(g);
   assert.doesNotMatch(html, /a-private-repo/, 'the repo name appears NOWHERE, not even in a link');
   assert.doesNotMatch(html, /secret work|acme|secret-branch|secret thing/i, 'nor anything else of it');
-  assert.doesNotMatch(html, /@wa0x6e/, 'nor its author');
+  assert.doesNotMatch(html, /@private-contributor/, 'nor its author');
   assert.match(html, /<text class="ref" [^>]*>#86<\/text>/, 'the card shows the number only');
   assert.match(html, /<tspan class="g">◇<\/tspan> private repo<\/text>/);
   assert.match(html, /#86 \(private repository, details withheld\)/, 'and the desc says why');
