@@ -30,9 +30,9 @@ export function unresolvedFeedback(pr, author) {
   const self = String(author || '').toLowerCase();
   return (pr.threads || []).filter(thread => {
     if (thread.isResolved) return false;
-    const authors = (thread.comments || [])
-      .map(comment => String(comment.author || '').toLowerCase())
-      .filter(Boolean);
+    const authors = (thread.comments || []).map(comment =>
+      String(comment.author || '').toLowerCase()
+    );
     return authors.length === 0 || authors.some(login => login !== self);
   });
 }
@@ -42,7 +42,7 @@ export function classifyReviewState(pr, author = 'tony8713', reviewer = 'wa0x6e'
   const reviewerKey = reviewer.toLowerCase();
   const reviewerDecision = latest.get(reviewerKey);
   const reviewerRequested = requestedFrom(pr, reviewer);
-  const reviewerApproved = reviewerDecision?.state === 'APPROVED';
+  const reviewerApproved = !reviewerRequested && reviewerDecision?.state === 'APPROVED';
   const unresolved = unresolvedFeedback(pr, author);
   const unclearedChanges = [...latest.values()].filter(
     review =>

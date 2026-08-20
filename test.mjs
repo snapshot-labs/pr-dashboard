@@ -206,13 +206,21 @@ await t('a Wan review request with no current approval waits for Wan', () => {
 });
 await t('a current Wan approval clears the waiting column', () => {
   const result = classifyReviewState(
+    reviewState({ reviews: [submitted('wa0x6e', 'APPROVED', 1)] })
+  );
+  assert.equal(result.reviewerApproved, true);
+  assert.equal(result.waitingForReview, false);
+});
+await t('a re-request makes a historical Wan approval pending again', () => {
+  const result = classifyReviewState(
     reviewState({
       reviewRequests: [requested('wa0x6e')],
       reviews: [submitted('wa0x6e', 'APPROVED', 1)]
     })
   );
-  assert.equal(result.reviewerApproved, true);
-  assert.equal(result.waitingForReview, false);
+  assert.equal(result.reviewerApproved, false);
+  assert.equal(result.waitingForReview, true);
+  assert.equal(result.waitingReason, 'review requested');
 });
 await t('unresolved external feedback needs Tony even when Wan is requested', () => {
   const result = classifyReviewState(
@@ -231,6 +239,13 @@ await t('Tony-only unresolved notes are not review feedback', () => {
   });
   assert.equal(unresolvedFeedback(pr, 'tony8713').length, 0);
   assert.equal(classifyReviewState(pr).needsAddressing, false);
+});
+await t('an unresolved thread with an unknown author is not treated as Tony-only', () => {
+  const pr = reviewState({
+    threads: [{ isResolved: false, comments: [{ author: 'tony8713' }, { author: null }] }]
+  });
+  assert.equal(unresolvedFeedback(pr, 'tony8713').length, 1);
+  assert.equal(classifyReviewState(pr).needsAddressing, true);
 });
 await t('uncleared CHANGES_REQUESTED needs Tony', () => {
   const result = classifyReviewState(
