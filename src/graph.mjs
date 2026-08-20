@@ -25,18 +25,6 @@
 //   A rank with twenty members is one tall column, and a graph twenty ranks deep
 //   is very wide and scrolls sideways. Both are the intended shape.
 //
-// WHAT A CARD SAYS. A card is the PR's ref and the PR's TITLE, because a bare
-// number is not a thing anyone recognises. Everything that was a status label --
-// CI wording, rank, "no prerequisites" -- is off the card: it made the card wide
-// and told the reader nothing about what merges before what. Three markers
-// survive, because each of them changes when or whether an edge clears, and each
-// has a legend entry under the drawing:
-//
-//   ◇ @handle   this PR is not the dashboard author's, so it is not theirs to merge
-//   ⊘ ...       the PR's OWN TITLE says do not merge (lifted out of the title so
-//               that truncating the title can never hide it)
-//   GATED       on an EDGE: satisfied by a published release, not by a merge
-//
 // WHAT A CARD IS FILLED WITH: the STATE of that pull request -- open, draft,
 // merged, or closed for a prerequisite that was abandoned. Colour on this canvas
 // means that and only that, which is what makes the fill readable at all.
@@ -60,6 +48,7 @@
 // column, who stands in it, and every edge -- and every node and every edge
 // carries a <title> of its own.
 
+import { createHash } from 'node:crypto';
 import { CI_LABEL } from './ci.mjs';
 import { PR_STATES, STATE_CLASS, STATE_GLYPH, STATE_LABEL, STATE_WORD } from './state.mjs';
 
@@ -227,7 +216,8 @@ export function clipToWidth(s, maxPx, size, mono = false) {
 
 // A node's ref. A target in a private repo shows its number and NOT the repo
 // name -- the page is public, and the repo name is part of what is withheld.
-export const nodeRef = n => (n.hidden ? `#${n.number}` : shortRef(n.repo, n.number));
+export const nodeRef = n =>
+  n.publicPrivate ? 'Private PR' : n.hidden ? `#${n.number}` : shortRef(n.repo, n.number);
 
 // A PR whose own title says DO NOT MERGE.
 //
@@ -291,9 +281,13 @@ export function nodeState(n) {
 // keeps its number and loses its repo name here exactly as it does everywhere
 // else: a card that is careful not to print a private repo name must not print
 // one in the reason it is blocked either.
-export const blockedRef = b => (b.hidden ? `#${b.number}` : shortRef(b.repo, b.number));
-export const nodeDomId = key =>
-  `pr-${String(key).replace(/[^A-Za-z0-9_-]/g, char => `_${char.charCodeAt(0).toString(16)}_`)}`;
+export const blockedRef = b =>
+  b.publicPrivate ? 'Private PR' : b.hidden ? `#${b.number}` : shortRef(b.repo, b.number);
+export const nodeDomId = key => `pr-${Buffer.from(String(key), 'utf8').toString('base64url')}`;
+export const privateNodeDomId = key =>
+  `private-pr-${createHash('sha256').update(String(key)).digest('hex')}`;
+export const nodeAnchorId = node =>
+  node.publicPrivate ? privateNodeDomId(node.key) : nodeDomId(node.key);
 
 export function nodeMarks(n, hold) {
   const out = [];
@@ -320,7 +314,7 @@ export function nodeMarks(n, hold) {
 
 // Everything drawn inside one card, and how tall that makes it.
 export function cardOf(n) {
-  const { title, hold } = splitHold(n.title);
+  const { title, hold } = splitHold(n.publicPrivate ? 'Private PR' : n.title);
   const known = Boolean(String(title || '').trim());
   const shown = known ? title : n.hidden ? 'title withheld (private repo)' : 'title unavailable';
   const lines = wrapText(shown, TEXT_W, TITLE_SIZE, TITLE_LINES);
@@ -336,7 +330,7 @@ export function cardOf(n) {
   // A withheld card never carries an avatar, whatever else it is holding. This
   // is the third of the three independent gates -- build.mjs blanks the url on
   // the record and again on the edge -- and it is the last one before markup.
-  const avatar = n.hidden ? null : n.avatarId || null;
+  const avatar = n.hidden || n.publicPrivate ? null : n.avatarId || null;
   const avRoom = avatar ? AV + AV_GAP : 0;
   const refRoom = TEXT_W - textWidth(stateText, MARK_SIZE) - 10 - avRoom;
   return {
@@ -346,7 +340,7 @@ export function cardOf(n) {
     state,
     stateText,
     title: shown,
-    fullTitle: n.title || null,
+    fullTitle: n.publicPrivate ? null : n.title || null,
     hold,
     dim: !known,
     lines: lines.length ? lines : [shown],
@@ -359,18 +353,23 @@ export function cardOf(n) {
 // on. With the per-PR list gone this is where a reader gets the detail back.
 export function nodeTitleText(n) {
   const bits = [nodeRef(n)];
-  bits.push(n.title || (n.hidden ? 'title withheld (private repo)' : 'title unavailable'));
+  bits.push(
+    n.publicPrivate
+      ? 'Private PR'
+      : n.title || (n.hidden ? 'title withheld (private repo)' : 'title unavailable')
+  );
   // The state in words, for every card and not only for a draft: this is the
   // fill spelled out, and it is what a reader gets who cannot use the colour.
   bits.push(nodeState(n).label);
   // CI is attributed to the tracked authors' own open PRs, mine and a tracked
   // bot's alike, so the same phrase answers the same question on both.
-  if (n.kind === 'own' || n.kind === 'bot') {
+  if (!n.publicPrivate && (n.kind === 'own' || n.kind === 'bot')) {
     if (n.pr && n.pr.ci) bits.push(CI_LABEL[n.pr.ci.state] || 'CI state unknown');
   }
   if (n.reviewHandoff === 'waiting_wan') bits.push('waiting for Wan review');
   else if (n.reviewHandoff === 'needs_tony') bits.push('Tony must address review feedback');
-  if (n.hidden) bits.push('private repo, details withheld');
+  if (n.publicPrivate) bits.push('private repository, metadata redacted');
+  else if (n.hidden) bits.push('private repo, details withheld');
   else if (n.kind === 'bot')
     bits.push(`@${n.author} — a tracked bot's PR, drawn and scheduled like the page author's`);
   else if (n.kind !== 'own') {
@@ -386,7 +385,7 @@ export function nodeTitleText(n) {
         ? 'already merged — drawn because something here still depends on it, and nothing is waiting on it any more'
         : 'already merged, but release-gated: the merge landed and the gate has not opened, so it is still in the way'
     );
-  if (n.status) bits.push(n.status);
+  if (!n.publicPrivate && n.status) bits.push(n.status);
   if (n.blockedBy && n.blockedBy.length) {
     bits.push(
       `blocked on ${n.blockedBy.map(blockedRef).join(', ')}, closed without merging — nothing will` +
@@ -673,7 +672,8 @@ export function columnLabel(r, maxRank, count, unordered = true, allMerged = fal
 // the one place a reader who cannot see the card will find it.
 export const descRef = n => {
   const notes = [];
-  if (n.hidden) notes.push('private repository, details withheld');
+  if (n.publicPrivate) notes.push('private repository, metadata redacted');
+  else if (n.hidden) notes.push('private repository, details withheld');
   // A tracked bot is named as one. The picture separates it from an ordinary
   // foreign card with a dotted outline rather than a dashed one, and a reader who
   // is not looking at the picture gets that same distinction in words here --
@@ -707,8 +707,8 @@ export function graphDesc(graph) {
 
   const blocked = graph.nodes.filter(n => n.blockedBy && n.blockedBy.length);
   const parts = [
-    'Each pull request is drawn exactly once, as a card carrying its repository, its number and' +
-      ' its title.',
+    'Each public-repository pull request is drawn exactly once, as a card carrying its repository,' +
+      ' its number and its title. A private card uses a neutral label and redacts its metadata.',
     'The graph reads left to right: an arrow runs from a prerequisite rightward to the pull' +
       ' request that waits on it, so the leftmost column merges first and the rightmost column' +
       ' merges last.',
@@ -1014,14 +1014,15 @@ export function graphSvg(graph, ids = {}) {
     // lose to a click. rel="noopener" goes with it because this page is served
     // publicly, and a tab we opened has no business holding a window handle back
     // to the one that opened it.
+    const url = n.publicPrivate
+      ? `https://github.com/${n.repo}/pull/${n.number}`
+      : n.url;
     const body = n.hidden
       ? inner.join('')
-      : `<a href="${esc(n.url)}" target="_blank" rel="noopener">${inner.join('')}</a>`;
-    const anchor = n.hidden
-      ? '<g class="node-anchor">'
-      : `<g id="${esc(nodeDomId(n.key))}" class="node-anchor">`;
+      : `<a href="${esc(url)}" target="_blank" rel="noopener">${inner.join('')}</a>`;
+    const anchorId = n.hidden ? '' : ` id="${esc(nodeAnchorId(n))}"`;
     out.push(
-      anchor +
+      `<g${anchorId} class="node-anchor">` +
         `<g class="node ${n.kind === 'bot' ? 'bot' : n.kind === 'own' ? 'own' : 'dep'} ` +
         `${c.state.cls}">` +
         `<title>${esc(nodeTitleText(n))}</title>${body}</g></g>`

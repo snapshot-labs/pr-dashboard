@@ -84,13 +84,13 @@ second merge order. Each compact reference jumps to the PR's canonical graph car
 handoff status is printed alongside the PR's existing dependency position. Titles and dependency
 cards are not duplicated in the lanes.
 
-**Waiting for Wan** contains Tony-authored open PRs for which `wa0x6e` is requested, or a prior Wan
-approval no longer satisfies an aggregate `REVIEW_REQUIRED` state. A current Wan approval clears the
-lane, and Tony must have no uncleared feedback on that PR. Aggregate `REVIEW_REQUIRED` alone does not
-assign a PR to Wan when there is no Wan request or prior Wan review. A resolved changes-requested
-review does not leave the PR in Tony's lane once every review thread is resolved and Wan has been
-requested again. It moves to Waiting for Wan instead, even while GitHub's aggregate
-`reviewDecision` remains stale.
+**Waiting for Wan** contains Tony-authored open PRs for which `wa0x6e` is requested, or Wan's latest
+approval targets an earlier head commit. An approval on the current head clears the lane even if the
+aggregate decision is `REVIEW_REQUIRED` because another required reviewer is missing. Tony must have
+no uncleared feedback on that PR. Aggregate `REVIEW_REQUIRED` alone does not assign a PR to Wan when
+there is no Wan request or prior Wan review. A resolved changes-requested review does not leave the PR
+in Tony's lane once every review thread is resolved and Wan has been requested again. It moves to
+Waiting for Wan instead, even while GitHub's aggregate `reviewDecision` remains stale.
 
 **Tony to address** contains Tony-authored open PRs with an unresolved external review thread, a
 substantive top-level `COMMENTED` review that has not been followed by a re-review request or later
@@ -476,39 +476,24 @@ python3 -m http.server -d dist             # look at it
 | `PR_REVIEW_EXPECTED_FINGERPRINT` | unset | poller guard; refuse if the build reads different review state |
 | `PR_BOT_AUTHORS` | `chai3-bot` | comma-separated bots whose open PRs are *also* seeded and anchor components; marked, dotted, counted apart. Set to empty for a page with none |
 | `PR_ORG` | `snapshot-labs` | which org |
-| `INCLUDE_PRIVATE` | `false` | render PRs from private repos |
 
 ### Private repos
 
-Two of the repos in scope are private, and the built page is served
-publicly. They are not named here either: a repo name is part of what is withheld, so it does not
-appear on the page, in this README, or in the tests. By default those PRs are **withheld**, and the page says so, with a count — it does not
-quietly drop them. Set `INCLUDE_PRIVATE=true` only for a build that is not public.
+The page is public. A private PR authored by `PR_AUTHOR` is reconstructed at ingestion as a minimal
+public record rather than passed through from GitHub. Its card and review lane use the neutral label
+`Private PR`, its open or draft state, and non-text review workflow state. The card keeps one canonical
+GitHub link. The repository and PR number appear only inside that link. Titles, bodies, review and
+comment text, branch names, SHAs, labels, avatars, dates, CI details and dependency declarations are
+discarded before graph construction.
 
-The count measures what privacy is hiding and nothing else, so it counts only PRs the page **would
-otherwise have drawn**: every tracked author's — yours and a tracked bot's alike — plus anybody's
-that something drawn depends on. Tracking a bot therefore widens what the notice *owns up to*, never
-what the page prints: a tracked author's private-repo PR is withheld and counted, on exactly the
-terms yours are, and is never redacted-and-drawn. A private PR that the
-component rule would prune anyway — nothing tracked anywhere in its component — is not counted as
-withheld, because calling it withheld would overstate the loss. The notice also says how many of
-them block a PR shown on the page, because a withheld PR that blocks nothing costs the graph a card
-with no edges rather than a broken chain. Today that is **2 withheld, 0 blocking**.
+Private PRs by tracked bots or other authors remain withheld or anonymous under the existing
+dependency rules. They are never promoted by this author-only policy. The withheld count excludes the
+neutral private cards that are actually drawn and continues to count only work privacy prevented the
+page from drawing.
 
-The page never names the private repos, and the component rule did not loosen that. Anything from a
-private repo that is drawn at all — a dependency target, or somebody else's PR that a component
-pulled in as a card of its own — keeps its **number** and loses everything else: no title, no
-author, and, since every other card is labelled `repo#number`, no repo name either. It is drawn as a
-bare `#number`, in the `<desc>` too, and it is the one card that is **not a link**: the `html_url`
-carries the repo name that the rest of the card is careful not to print.
-
-A hidden card also loses its **body**, which means it declares no dependencies of its own: it
-contributes no branch names and no edge reasons, and is drawn with only the one edge that pulled it
-in. A card the page cannot even name has no business printing prose out of a private repo. For the
-same reason a private repo is never *swept* for candidates on a public build — only the repos it can
-name are.
-
-Your own private PRs are the one thing not drawn at all: they are withheld and counted, per above.
+Private repositories are never swept for dependency candidates. A neutral private card derives no
+CI, avatar or dependencies. A public PR may still point to an anonymous private dependency under the
+older hidden-node rule, which does not expose a repository name or link.
 
 ## Tokens
 
@@ -533,7 +518,8 @@ git commit -m "activate scheduled build" && git push
 ```
 
 The GitHub Action remains inactive. The operating server's five-minute poller performs the scheduled
-refresh instead. It fingerprints review requests, aggregate decisions, submitted review activity and
-unresolved-thread state. A changed fingerprint invokes the same full `./publish.sh` path, and the
+refresh instead. It fingerprints the head commit, review requests, aggregate decisions, submitted
+review activity with each review's commit, and unresolved-thread state. A changed fingerprint
+invokes the same full `./publish.sh` path, and the
 build must reproduce the poller's expected fingerprint before it may push `gh-pages`. A failed or
 racing publication remains queued and retries on the next tick.

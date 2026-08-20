@@ -19,7 +19,7 @@ function latestByReviewer(reviews, accepts) {
     latest.set(login, {
       login: review.author,
       state,
-      body: review.body || '',
+      commitOid: review.commitOid || null,
       submittedAt,
       index
     });
@@ -31,10 +31,14 @@ export function latestDecisions(reviews = []) {
   return latestByReviewer(reviews, (_review, state) => DECIDING_STATES.has(state));
 }
 
+function hasReviewBody(review) {
+  return review.hasBody ?? Boolean(review.body?.trim());
+}
+
 function latestSubstantiveReviews(reviews = []) {
   return latestByReviewer(
     reviews,
-    (review, state) => DECIDING_STATES.has(state) || (state === 'COMMENTED' && review.body?.trim())
+    (review, state) => DECIDING_STATES.has(state) || (state === 'COMMENTED' && hasReviewBody(review))
   );
 }
 
@@ -62,12 +66,15 @@ export function classifyReviewState(pr, author = 'tony8713', reviewer = 'wa0x6e'
   const authorKey = author.toLowerCase();
   const reviewerKey = reviewer.toLowerCase();
   const reviewerDecision = latest.get(reviewerKey);
+  const reviewerState = reviewerDecision?.state;
   const reviewerRequested = requestedFrom(pr, reviewer);
+  const approvalOnCurrentHead =
+    reviewerState === 'APPROVED' &&
+    Boolean(pr.headRefOid) &&
+    reviewerDecision.commitOid === pr.headRefOid;
   const reapprovalNeeded =
-    pr.reviewDecision === 'REVIEW_REQUIRED' &&
-    ['APPROVED', 'DISMISSED'].includes(reviewerDecision?.state);
-  const reviewerApproved =
-    !reviewerRequested && !reapprovalNeeded && reviewerDecision?.state === 'APPROVED';
+    reviewerState === 'DISMISSED' || (reviewerState === 'APPROVED' && !approvalOnCurrentHead);
+  const reviewerApproved = !reviewerRequested && approvalOnCurrentHead;
   const unresolved = unresolvedFeedback(pr, author);
   const unclearedChanges = [...latest.values()].filter(
     review =>
@@ -104,7 +111,7 @@ export function classifyReviewState(pr, author = 'tony8713', reviewer = 'wa0x6e'
   let waitingReason = null;
   if (waitingForReview) {
     waitingReason =
-      reviewerDecision?.state === 'CHANGES_REQUESTED'
+      reviewerState === 'CHANGES_REQUESTED'
         ? 're-review requested'
         : reviewerRequested
           ? 'review requested'
@@ -124,20 +131,23 @@ export function classifyReviewState(pr, author = 'tony8713', reviewer = 'wa0x6e'
 }
 
 function reviewActivity(reviews = []) {
+  const key = review =>
+    [
+      (review.reviewer || '').toLowerCase(),
+      review.state || '',
+      review.commit_oid || '',
+      review.submitted_at || '',
+      String(review.has_body)
+    ].join('\0');
   return reviews
     .map(review => ({
       reviewer: review.author || null,
       state: review.state || null,
+      commit_oid: review.commitOid || null,
       submitted_at: review.submittedAt || null,
-      has_body: Boolean(review.body?.trim())
+      has_body: hasReviewBody(review)
     }))
-    .sort((a, b) =>
-      [(a.reviewer || '').toLowerCase(), a.state || '', a.submitted_at || '', String(a.has_body)]
-        .join('\0')
-        .localeCompare(
-          [(b.reviewer || '').toLowerCase(), b.state || '', b.submitted_at || '', String(b.has_body)].join('\0')
-        )
-    );
+    .sort((a, b) => key(a).localeCompare(key(b)));
 }
 
 export function reviewSnapshot(prs, author = 'tony8713', reviewer = 'wa0x6e') {
@@ -145,7 +155,11 @@ export function reviewSnapshot(prs, author = 'tony8713', reviewer = 'wa0x6e') {
     [...(prs || [])]
       .sort((a, b) => a.key.localeCompare(b.key))
       .map(pr => {
-        if (pr.isPrivate) return [pr.key, { private: true, workflow: 'withheld' }];
+        if (
+          pr.isPrivate &&
+          String(pr.author || '').toLowerCase() !== String(author || '').toLowerCase()
+        )
+          return [pr.key, { private: true, workflow: 'withheld' }];
         const classification = classifyReviewState(pr, author, reviewer);
         const latest = latestDecisions(pr.reviews);
         return [
@@ -153,9 +167,14 @@ export function reviewSnapshot(prs, author = 'tony8713', reviewer = 'wa0x6e') {
           {
             decision: pr.reviewDecision || null,
             draft: Boolean(pr.isDraft),
-            private: false,
+            head_oid: pr.headRefOid || null,
+            private: Boolean(pr.isPrivate),
             latest_decisions: [...latest.values()]
-              .map(review => ({ reviewer: review.login, state: review.state }))
+              .map(review => ({
+                reviewer: review.login,
+                state: review.state,
+                commit_oid: review.commitOid
+              }))
               .sort((a, b) => a.reviewer.toLowerCase().localeCompare(b.reviewer.toLowerCase())),
             review_states: reviewActivity(pr.reviews),
             requests: (pr.reviewRequests || [])

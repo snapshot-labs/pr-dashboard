@@ -4,6 +4,7 @@ import { parseDeclarations } from './src/declarations.mjs';
 import { classify } from './src/ci.mjs';
 import {
   accountWithheld,
+  addCandidateRecord,
   buildGraph,
   collectAvatars,
   componentsOf,
@@ -15,6 +16,7 @@ import {
   isMineFor,
   mergedNonPrerequisites,
   prRecord,
+  publicPrivatePr,
   redactPrivate,
   resolveDeps,
   seedRecords,
@@ -30,6 +32,7 @@ import {
   layoutGraph,
   NODE_H,
   NODE_W,
+  nodeAnchorId,
   nodeDomId,
   nodeState,
   nodeTitleText,
@@ -180,6 +183,8 @@ await t('one target declared twice, in two spellings, is one declaration', () =>
 console.log('review handoff classification');
 const reviewState = over => ({
   key: 'snapshot-labs/stamp#1',
+  author: 'tony8713',
+  headRefOid: 'head-current',
   isDraft: false,
   isPrivate: false,
   reviewDecision: 'REVIEW_REQUIRED',
@@ -191,6 +196,7 @@ const reviewState = over => ({
 const submitted = (author, state, minute = 0, over = {}) => ({
   author,
   state,
+  commitOid: 'head-current',
   submittedAt: `2026-08-19T12:${String(minute).padStart(2, '0')}:00Z`,
   ...over
 });
@@ -225,13 +231,25 @@ await t('a current Wan approval clears the waiting column', () => {
   assert.equal(result.reviewerApproved, true);
   assert.equal(result.waitingForReview, false);
 });
-await t('aggregate review required makes a historical Wan approval need reapproval', () => {
+await t('a prior-head Wan approval needs reapproval', () => {
   const result = classifyReviewState(
-    reviewState({ reviews: [submitted('wa0x6e', 'APPROVED', 1)] })
+    reviewState({
+      reviews: [submitted('wa0x6e', 'APPROVED', 1, { commitOid: 'head-before-push' })]
+    })
   );
   assert.equal(result.reviewerApproved, false);
   assert.equal(result.waitingForReview, true);
   assert.equal(result.waitingReason, 'reapproval needed');
+});
+await t('a current-head Wan approval remains current when another reviewer is missing', () => {
+  const result = classifyReviewState(
+    reviewState({
+      reviewDecision: 'REVIEW_REQUIRED',
+      reviews: [submitted('wa0x6e', 'APPROVED', 1)]
+    })
+  );
+  assert.equal(result.reviewerApproved, true);
+  assert.equal(result.waitingForReview, false);
 });
 await t('a re-request makes a historical Wan approval pending again', () => {
   const result = classifyReviewState(
@@ -354,18 +372,78 @@ await t('workflow queues are disjoint and newest first', () => {
   assert.deepEqual(queues.waitingForWan.map(item => item.number), [2, 1]);
   assert.deepEqual(queues.needsTony.map(item => item.number), [4, 3]);
 });
-await t('review fingerprint is canonical across public state and private withholding', () => {
+await t('a neutral Tony private card participates in review handoff queues', () => {
+  const node = {
+    key: 'snapshot-labs/private#34',
+    repo: 'snapshot-labs/private',
+    number: 34,
+    publicPrivate: true,
+    updatedAt: null
+  };
+  const inventory = [
+    reviewState({
+      key: node.key,
+      isPrivate: true,
+      reviews: [submitted('wa0x6e', 'COMMENTED', 1, { hasBody: true })]
+    })
+  ];
+  const queues = reviewQueues([node], inventory);
+  assert.deepEqual(queues.waitingForWan, []);
+  assert.deepEqual(queues.needsTony.map(item => item.key), [node.key]);
+  assert.equal(queues.needsTony[0].addressingReason, '1 unresolved top-level review comment');
+});
+await t('review fingerprint is canonical across public and private workflow state', () => {
+  const teamRequest = { kind: 'Team', login: null, slug: 'core' };
   const publicPr = reviewState({
     reviewDecision: 'CHANGES_REQUESTED',
-    reviewRequests: [requested('wa0x6e')],
+    reviewRequests: [requested('wa0x6e'), teamRequest],
     reviews: [submitted('wa0x6e', 'CHANGES_REQUESTED', 0)],
     threads: [{ isResolved: true, comments: [{ author: 'wa0x6e' }, { author: 'tony8713' }] }]
   });
-  const privatePr = reviewState({ key: 'snapshot-labs/private#2', isPrivate: true });
-  const snapshot = reviewSnapshot([privatePr, publicPr]);
-  assert.deepEqual(snapshot[privatePr.key], { private: true, workflow: 'withheld' });
+  const privatePr = reviewState({
+    key: 'snapshot-labs/private#2',
+    isPrivate: true,
+    reviews: [submitted('wa0x6e', 'COMMENTED', 1, { body: 'PRIVATE_REVIEW_BODY_SENTINEL' })]
+  });
+  const foreignPrivate = reviewState({
+    key: 'snapshot-labs/foreign-private#3',
+    author: 'chai3-bot',
+    isPrivate: true,
+    reviewRequests: [requested('wa0x6e')],
+    reviews: [submitted('wa0x6e', 'COMMENTED', 1, { body: 'FOREIGN_PRIVATE_SENTINEL' })]
+  });
+  const records = [foreignPrivate, privatePr, publicPr];
+  const snapshot = reviewSnapshot(records);
+  assert.deepEqual(snapshot[foreignPrivate.key], { private: true, workflow: 'withheld' });
+  assert.equal(snapshot[privatePr.key].private, true);
+  assert.equal(snapshot[privatePr.key].workflow, 'needs_tony');
+  assert.equal(snapshot[privatePr.key].review_states[0].has_body, true);
+  assert.doesNotMatch(
+    JSON.stringify(snapshot),
+    /PRIVATE_REVIEW_BODY_SENTINEL|FOREIGN_PRIVATE_SENTINEL/
+  );
   assert.equal(snapshot[publicPr.key].workflow, 'waiting_wan');
-  assert.equal(reviewFingerprint([privatePr, publicPr]), '0f23ae9e39a57e9fe5df7c4ae54f56906a726a80f4e8013b9afa74298b525f19');
+  assert.deepEqual(snapshot[publicPr.key].requests, ['Team:core', 'User:wa0x6e']);
+  assert.equal(
+    reviewFingerprint(records),
+    reviewFingerprint([
+      foreignPrivate,
+      privatePr,
+      { ...publicPr, reviewRequests: [teamRequest, requested('wa0x6e')] }
+    ])
+  );
+  assert.equal(
+    reviewFingerprint(records),
+    reviewFingerprint([
+      foreignPrivate,
+      {
+        ...privatePr,
+        reviews: [submitted('wa0x6e', 'COMMENTED', 1, { body: 'DIFFERENT_PRIVATE_TEXT' })]
+      },
+      publicPr
+    ])
+  );
+  assert.equal(reviewFingerprint(records), 'a6c4533a16982f69da29fb5e189d8104397b5d1e949ee3d831453965db1c7681');
 });
 await t('review handoff renders both meanings and links', () => {
   const html = renderReviewHandoff({
@@ -398,10 +476,17 @@ await t('review handoff renders both meanings and links', () => {
   assert.match(html, /changes requested without a later handoff/);
   assert.match(html, /stamp#1/);
   assert.match(html, /1 unresolved review thread/);
-  assert.match(html, /href="#pr-snapshot-labs_2f_stamp_23_1"/);
-  assert.match(html, /href="#pr-snapshot-labs_2f_stamp_23_2"/);
+  assert.match(html, new RegExp(`href="#${nodeDomId('snapshot-labs/stamp#1')}"`));
+  assert.match(html, new RegExp(`href="#${nodeDomId('snapshot-labs/stamp#2')}"`));
   assert.doesNotMatch(html, /Ready to review|Needs a fix/);
   assert.doesNotMatch(html, /target="_blank"/);
+});
+await t('canonical graph node IDs are injective for encoded-looking repo names', () => {
+  const dotted = nodeDomId('snapshot-labs/a.b#1');
+  const encodedLooking = nodeDomId('snapshot-labs/a_2e_b#1');
+  assert.notEqual(dotted, encodedLooking);
+  assert.match(dotted, /^pr-[A-Za-z0-9_-]+$/);
+  assert.match(encodedLooking, /^pr-[A-Za-z0-9_-]+$/);
 });
 await t('review handoff cannot render inventory outside the visible public nodes', () => {
   const visible = [
@@ -786,6 +871,97 @@ await t('a private target keeps its link but loses title and author', () => {
   assert.equal(e.hidden, true);
 });
 
+const PRIVATE_REPO = 'snapshot-labs/private-fixture';
+const privateFull = (author = 'tony8713') => ({
+  number: 34,
+  title: 'PRIVATE_TITLE_SENTINEL',
+  html_url: 'https://example.invalid/PRIVATE_URL_SENTINEL',
+  user: { login: author, avatar_url: 'https://example.invalid/PRIVATE_AVATAR_SENTINEL' },
+  draft: false,
+  state: 'open',
+  merged_at: null,
+  head: {
+    ref: 'PRIVATE_HEAD_SENTINEL',
+    sha: 'PRIVATE_SHA_SENTINEL',
+    repo: { full_name: PRIVATE_REPO }
+  },
+  base: { ref: 'PRIVATE_BASE_SENTINEL', repo: { full_name: PRIVATE_REPO } },
+  mergeable_state: 'PRIVATE_MERGE_SENTINEL',
+  created_at: 'PRIVATE_CREATED_SENTINEL',
+  updated_at: 'PRIVATE_UPDATED_SENTINEL',
+  body: 'PRIVATE_BODY_SENTINEL\nDepends on #999',
+  labels: [{ name: 'PRIVATE_LABEL_SENTINEL' }],
+  reviews: [{ body: 'PRIVATE_REVIEW_SENTINEL' }],
+  comments: [{ body: 'PRIVATE_COMMENT_SENTINEL' }],
+  ci: { name: 'PRIVATE_CI_SENTINEL' }
+});
+await t('Tony private seed is reconstructed from an exact neutral allowlist', () => {
+  const rec = publicPrivatePr(
+    privateFull(),
+    PRIVATE_REPO,
+    { private: true, defaultBranch: 'PRIVATE_DEFAULT_SENTINEL' },
+    'tony8713'
+  );
+  assert.deepEqual(Object.keys(rec).sort(), [
+    'author',
+    'avatarUrl',
+    'base',
+    'baseRepo',
+    'body',
+    'createdAt',
+    'deps',
+    'draft',
+    'head',
+    'headSha',
+    'key',
+    'mergeable',
+    'number',
+    'private',
+    'publicPrivate',
+    'repo',
+    'state',
+    'status',
+    'title',
+    'updatedAt',
+    'url'
+  ]);
+  assert.deepEqual(
+    {
+      key: rec.key,
+      title: rec.title,
+      url: rec.url,
+      author: rec.author,
+      state: rec.state,
+      private: rec.private,
+      publicPrivate: rec.publicPrivate,
+      deps: rec.deps
+    },
+    {
+      key: `${PRIVATE_REPO}#34`,
+      title: 'Private PR',
+      url: `https://github.com/${PRIVATE_REPO}/pull/34`,
+      author: 'tony8713',
+      state: 'open',
+      private: true,
+      publicPrivate: true,
+      deps: []
+    }
+  );
+  assert.doesNotMatch(JSON.stringify(rec), /PRIVATE_[A-Z_]*SENTINEL/);
+  assert.equal(publicPrivatePr(privateFull('chai3-bot'), PRIVATE_REPO, { private: true }, 'tony8713'), null);
+  assert.equal(publicPrivatePr(privateFull(), PRIVATE_REPO, { private: false }, 'tony8713'), null);
+});
+await t('main candidate admission keeps neutral Tony private seeds and withholds tracked bots', () => {
+  const pool = new Map();
+  const tracked = isMineFor(['tony8713', 'chai3-bot']);
+  const own = publicPrivatePr(privateFull(), PRIVATE_REPO, { private: true }, 'tony8713');
+  assert.equal(addCandidateRecord(pool, own, tracked), own);
+  assert.equal(pool.get(own.key), own);
+  const bot = { ...own, key: `${PRIVATE_REPO}#35`, number: 35, author: 'chai3-bot', publicPrivate: false };
+  assert.equal(addCandidateRecord(pool, bot, tracked), null);
+  assert.equal(pool.has(bot.key), false);
+});
+
 console.log('withheld accounting');
 const wh = (repo, number, author) => ({ repo, number, author, private: true });
 await t('withheld PRs of mine are counted, and none blocks anything', () => {
@@ -812,11 +988,7 @@ await t('a withheld PR by another author that nothing depends on is NOT counted'
   const r = accountWithheld([wh('snapshot-labs/a-private-repo', 90, 'someone-else')], [pr(1, 'tony8713')], mine);
   assert.equal(r.count, 0);
 });
-await t("a tracked BOT's private PR is counted as withheld, on the same terms as mine", () => {
-  // The privacy consequence of tracking a second author, pinned. A tracked
-  // author's private-repo PR is WITHHELD and counted -- never redacted and drawn
-  // -- so widening the tracked set widens what the notice OWNS UP TO, not what
-  // the page prints.
+await t("a tracked BOT's private PR remains withheld and counted", () => {
   const tracked = isMineFor(['tony8713', 'chai3-bot']);
   const priv = [wh('snapshot-labs/a-private-repo', 42, 'chai3-bot')];
   const r = accountWithheld(priv, [pr(1, 'tony8713')], tracked);
@@ -1734,13 +1906,12 @@ const summariesOf = html =>
   [...html.matchAll(/<summary>([\s\S]*?)<\/summary>/g)].map(m => m[1].replace(/<[^>]*>/g, '').trim());
 // The visible words, not counting the drawing's own text (column headers and
 // card titles are the picture, not prose about it).
-const visibleWords = html =>
+const visibleText = html =>
   fold(html)
     .replace(/<svg[\s\S]*?<\/svg>/g, ' ')
     .replace(/<head[\s\S]*?<\/head>/g, ' ')
-    .replace(/<[^>]*>/g, ' ')
-    .split(/\s+/)
-    .filter(Boolean).length;
+    .replace(/<[^>]*>/g, ' ');
+const visibleWords = html => visibleText(html).split(/\s+/).filter(Boolean).length;
 
 console.log('the graph is the page; everything else is behind a summary');
 await t('the drawing itself is never inside a collapsed block', () => {
@@ -1828,9 +1999,13 @@ await t('the withheld notice is FOLDED, not deleted, and its count survives bein
   assert.match(html, /<summary>2 PRs withheld from this page<\/summary>/);
   assert.match(fold(html), /2 PRs withheld from this page/, 'the count is legible while shut');
   assert.match(html, /<strong>2 PRs withheld\.<\/strong>/, 'the notice itself is still there');
-  assert.match(html, /INCLUDE_PRIVATE=true/);
+  assert.match(html, /outside the author-only neutral-card policy/);
   assert.match(html, /does not pretend the work does not exist/);
-  assert.doesNotMatch(fold(html), /INCLUDE_PRIVATE=true/, 'but the accounting is folded');
+  assert.doesNotMatch(
+    fold(html),
+    /outside the author-only neutral-card policy/,
+    'but the accounting is folded'
+  );
 });
 await t('an edge that cannot be drawn also keeps its count in the summary', () => {
   const html = page(buildGraph([sp(1, [edge(S, 2)]), sp(2, [edge(S, 3)]), sp(3, [edge(S, 2)])]));
@@ -1862,14 +2037,25 @@ await t('the page still reads with the stylesheet stripped', () => {
     'the graph precedes every collapsed block in source order, so it is first either way'
   );
 });
-await t('the prose competing with the drawing is a fraction of what it was', () => {
-  // The measured form of the complaint. The page carried ~1750 visible words
-  // above the drawing and around it; what is left is the heading, one caption,
-  // the key to the marks, and four summaries.
-  const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
+await t('the review board and prose competing with the drawing stay compact', () => {
+  const graph = buildGraph([sp(491, [edge(S, 504)]), sp(504)]);
+  const waiting = at(graph, `${S}#491`);
+  const addressing = at(graph, `${S}#504`);
+  waiting.reviewHandoff = 'waiting_wan';
+  addressing.reviewHandoff = 'needs_tony';
+  const html = page(graph, {
+    workflow: {
+      waitingForWan: [{ ...waiting, waitingReason: 'review requested' }],
+      needsTony: [{ ...addressing, addressingReason: '1 unresolved review thread' }]
+    }
+  });
+  const text = visibleText(html);
   const words = visibleWords(html);
+  assert.match(text, /Review handoff/);
+  assert.match(text, /Waiting for Wan\s+1[\s\S]*stamp#491/);
+  assert.match(text, /Tony to address\s+1[\s\S]*stamp#504/);
   assert.ok(words < 270, `${words} visible words`);
-  assert.ok(words > 100, `${words} visible words -- the workflow board and legend must survive`);
+  assert.ok(words > 100, `${words} visible words`);
 });
 
 console.log('with the list gone, the SVG is the text alternative');
@@ -1884,7 +2070,7 @@ await t('role, title and desc survive, and the desc carries the WHOLE structure'
   assert.match(html, /<title id="graph-title">Dependency graph: 3 pull requests, 2 dependency edges/);
   assert.match(
     html,
-    /<desc id="graph-desc">Each pull request is drawn exactly once, as a card carrying its repository, its number and its title\./
+    /<desc id="graph-desc">Each public-repository pull request is drawn exactly once, as a card carrying its repository, its number and its title\. A private card uses a neutral label and redacts its metadata\./
   );
   assert.match(html, /stacked in the same column are independent of one another/);
   // every column, everything standing in it, and every edge -- in words
@@ -1978,7 +2164,8 @@ await t('the page says a bot PR is here to be scheduled, not because it is in th
   assert.match(html, /A tracked bot's PR is dotted, not dashed/);
   assert.match(html, /<strong>Tracked bots\.<\/strong>/);
   assert.match(html, /There is no rule on this page\s*about <em>where<\/em> a card may sit/);
-  assert.match(html, /A bot's PR in a private repo is withheld and counted in the notice above/);
+  assert.match(html, /A bot's PR in a private repo remains withheld/);
+  assert.match(html, /neutral linked-card policy applies only\s+to/);
 });
 await t('NEGATIVE: with no tracked bot the page says nothing about one', () => {
   const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
@@ -2093,6 +2280,44 @@ await t('splitHold lifts a bracketed hold and leaves an unbracketed one in the t
   assert.equal(splitHold('fix: an ordinary title').hold, null);
   assert.equal(splitHold(null).hold, null);
 });
+await t('a neutral Tony private card and review lane expose only one canonical link', () => {
+  const rec = publicPrivatePr(privateFull(), PRIVATE_REPO, { private: true }, 'tony8713');
+  const graph = buildGraph([rec], mine);
+  const node = at(graph, `${PRIVATE_REPO}#34`);
+  node.reviewHandoff = 'needs_tony';
+  node.title = 'PRIVATE_RENDER_TITLE_SENTINEL';
+  node.author = 'PRIVATE_AUTHOR_SENTINEL';
+  node.avatarId = 'PRIVATE_AVATAR_ID_SENTINEL';
+  node.status = 'PRIVATE_STATUS_SENTINEL';
+  node.url = 'https://example.invalid/PRIVATE_RENDER_URL_SENTINEL';
+  node.pr.ci = { state: 'own-red', name: 'PRIVATE_CI_SENTINEL' };
+  const html = page(graph, {
+    workflow: {
+      waitingForWan: [],
+      needsTony: [{ ...node, addressingReason: 'PRIVATE_REASON_SENTINEL' }]
+    }
+  });
+  assert.equal(occurrences(html, PRIVATE_REPO), 1, 'private identity exists only in the authorized link');
+  assert.equal(
+    occurrences(html, `href="https://github.com/${PRIVATE_REPO}/pull/34"`),
+    1,
+    'one canonical private PR navigation'
+  );
+  assert.doesNotMatch(html, /PRIVATE_[A-Z_]*SENTINEL/);
+  assert.doesNotMatch(html, /private-fixture#34|#34/);
+  assert.match(html, /<span class="handoff-ref">Private PR<\/span>/);
+  assert.match(html, /<span class="handoff-reason">review feedback pending<\/span>/);
+  assert.match(html, /class="mark m-review-addressing"/);
+  assert.match(
+    html,
+    /Private PR[^<]+Private PR[^<]+open[^<]+Tony must address review feedback[^<]+private repository, metadata redacted/
+  );
+  assert.match(html, new RegExp(`href="#${nodeAnchorId(node)}"`));
+  assert.match(html, new RegExp(`<g id="${nodeAnchorId(node)}"`));
+  assert.notEqual(nodeAnchorId(node), nodeDomId(node.key));
+  assert.doesNotMatch(html, /class="av"|href="#PRIVATE_AVATAR/);
+  assert.doesNotMatch(html, /PRs? withheld from this page/);
+});
 await t('a private dependency target keeps its number and never its repo name, href included', () => {
   const p = sp(491, [
     edge('snapshot-labs/a-private-repo', 86, {
@@ -2159,7 +2384,7 @@ await t('the withheld notice keeps its accounting', () => {
   assert.match(html, /<strong>2 PRs withheld\.<\/strong>/);
   assert.match(html, /Neither blocks anything on this page/);
   assert.match(html, /2 cards that would have had no edges anyway, not a broken chain/);
-  assert.match(html, /INCLUDE_PRIVATE=true/);
+  assert.match(html, /outside the author-only neutral-card policy/);
   assert.match(html, /does not pretend the work does not exist/);
 });
 await t('the graph-versus-tree essay and the CI explainer are gone; the syntax help stays', () => {

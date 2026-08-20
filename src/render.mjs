@@ -39,7 +39,15 @@
 // stylesheet does not spill the prose back over the drawing, and the drawing
 // precedes every folded block in source order either way.
 
-import { esc, graphCss, graphSvg, layoutGraph, nodeDomId, nodeState, shortRef } from './graph.mjs';
+import {
+  esc,
+  graphCss,
+  graphSvg,
+  layoutGraph,
+  nodeAnchorId,
+  nodeState,
+  shortRef
+} from './graph.mjs';
 import { STATE_GLYPH, STATE_WORD } from './state.mjs';
 
 // The card-fill key.
@@ -77,15 +85,21 @@ export function renderReviewHandoff(
     items.length
       ? `<ol class="handoff-list">${items
           .map(item => {
-            const ref = shortRef(item.repo, item.number);
+            const privateCard = Boolean(item.publicPrivate);
+            const ref = privateCard ? 'Private PR' : shortRef(item.repo, item.number);
+            const reason = privateCard
+              ? kind === 'waiting'
+                ? 'review pending'
+                : 'review feedback pending'
+              : kind === 'waiting'
+                ? item.waitingReason
+                : item.addressingReason;
             return `<li>
-<a class="handoff-link ${kind}" href="#${esc(nodeDomId(item.key))}" aria-label="Find ${esc(
+<a class="handoff-link ${kind}" href="#${esc(nodeAnchorId(item))}" aria-label="Find ${esc(
               ref
             )} in the dependency graph">
 <span class="handoff-ref">${esc(ref)}</span>
-<span class="handoff-reason">${esc(
-              kind === 'waiting' ? item.waitingReason : item.addressingReason
-            )}</span>
+<span class="handoff-reason">${esc(reason)}</span>
 </a>
 </li>`;
           })
@@ -204,16 +218,9 @@ export function render({
     ? `<details class="fold warn">
 <summary>${n} PR${many ? 's' : ''} withheld from this page</summary>
 <p><strong>${n} PR${many ? 's' : ''} withheld.</strong>
-       ${
-         bots.length
-           ? many
-             ? `They are ${esc(author)}'s own or a tracked bot's (${botHandles}) and live in private repos`
-             : `It is ${esc(author)}'s own or a tracked bot's (${botHandles}) and lives in a private repo`
-           : many
-             ? `They are ${esc(author)}'s own and live in private repos`
-             : `It is ${esc(author)}'s own and lives in a private repo`
-       },
-       and this page is served publicly, so ${many ? 'they are' : 'it is'} not drawn here.
+       ${many ? 'They live' : 'It lives'} in private ${many ? 'repositories' : 'a repository'} and ${
+         many ? 'are' : 'is'
+       } outside the author-only neutral-card policy, so ${many ? 'they are' : 'it is'} not drawn here.
        ${
          withheld.blocking
            ? `<strong>${withheld.blocking}</strong> of ${many ? 'them' : 'it'} block${withheld.blocking > 1 ? '' : 's'}
@@ -223,7 +230,6 @@ export function render({
               missing from the graph: withholding ${many ? 'them' : 'it'} costs the page
               ${n} card${many ? 's' : ''} that would have had no edges anyway, not a broken chain.`
        }
-       Set <code>INCLUDE_PRIVATE=true</code> on a private build to see ${many ? 'them' : 'it'}.
        This page does not pretend the work does not exist.</p>
 </details>`
     : '';
@@ -287,12 +293,13 @@ a{color:inherit}
   padding:0 7px;text-align:center;font-size:12px}
 .handoff-column>p{color:var(--ink2);font-size:12px;margin:0 0 12px}
 .handoff-list{display:grid;gap:7px;list-style:none;margin:0;padding:0}
-.handoff-link{display:grid;grid-template-columns:minmax(90px,auto) 1fr;gap:8px;
-  border:1px solid var(--rule);border-left:3px solid var(--warning);border-radius:5px;
-  padding:7px 9px;text-decoration:none;background:var(--surface)}
-.handoff-link:hover,.handoff-link:focus{border-color:var(--ink2);border-left-color:var(--warning)}
-.handoff-link.addressing,.handoff-link.addressing:hover,.handoff-link.addressing:focus{
-  border-left-color:var(--serious)}
+.handoff-link{--handoff-accent:var(--warning);display:grid;
+  grid-template-columns:minmax(90px,auto) 1fr;gap:8px;border:1px solid var(--rule);
+  border-left:3px solid var(--handoff-accent);border-radius:5px;padding:7px 9px;
+  text-decoration:none;background:var(--surface)}
+.handoff-link:hover,.handoff-link:focus{
+  border-color:var(--ink2);border-left-color:var(--handoff-accent)}
+.handoff-link.addressing{--handoff-accent:var(--serious)}
 .handoff-ref{font:600 11px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink)}
 .handoff-reason{font-size:11px;color:var(--ink2)}
 .handoff-empty{border:1px dashed var(--rule);border-radius:5px;padding:10px;text-align:center}
@@ -498,8 +505,8 @@ it — first column, last, or in the middle, exactly like any other card. There 
 about <em>where</em> a card may sit; rank comes from edges and nothing else. What tracking does
 <strong>not</strong> do is make the work <code>${esc(author)}</code>'s: a bot's card is dotted rather
 than dashed, still carries <code>◇ @handle</code>, and is counted separately from the open-PR total
-at the top. A bot's PR in a private repo is withheld and counted in the notice above, on the same
-terms as <code>${esc(author)}</code>'s own.</p>`
+at the top. A bot's PR in a private repo remains withheld; the neutral linked-card policy applies only
+to <code>${esc(author)}</code>'s own private PRs.</p>`
       : ''
   }
 <p>This replaced a narrower rule — <em>somebody else's PR is drawn only as the target of one of

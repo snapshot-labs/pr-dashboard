@@ -185,6 +185,8 @@ export async function getReviewInventory(author, org) {
         nodes {
           ... on PullRequest {
             number
+            author { login }
+            headRefOid
             isDraft
             reviewDecision
             repository { nameWithOwner isPrivate }
@@ -203,6 +205,7 @@ export async function getReviewInventory(author, org) {
               nodes {
                 author { login }
                 state
+                commit { oid }
                 submittedAt
                 body
               }
@@ -260,6 +263,8 @@ export async function getReviewInventory(author, org) {
     const threads = complete(node.reviewThreads, `${key} review threads`);
     return {
       key,
+      author: node.author?.login || null,
+      headRefOid: node.headRefOid,
       isDraft: Boolean(node.isDraft),
       isPrivate: Boolean(node.repository.isPrivate),
       reviewDecision: node.reviewDecision,
@@ -274,8 +279,9 @@ export async function getReviewInventory(author, org) {
       reviews: reviews.map(review => ({
         author: review.author?.login || null,
         state: review.state,
+        commitOid: review.commit?.oid || null,
         submittedAt: review.submittedAt,
-        body: review.body || ''
+        hasBody: Boolean(review.body?.trim())
       })),
       threads: threads.map((thread, index) => ({
         isResolved: thread.isResolved,

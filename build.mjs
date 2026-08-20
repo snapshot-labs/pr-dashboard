@@ -135,10 +135,6 @@ const BOT_AUTHORS = (process.env.PR_BOT_AUTHORS ?? 'chai3-bot')
   .map(s => s.trim())
   .filter(Boolean);
 export const TRACKED_AUTHORS = [AUTHOR, ...BOT_AUTHORS];
-// Private repos are withheld from the built page by default, because the page
-// is served publicly. The page still SAYS they were withheld -- it never
-// pretends the work does not exist.
-const INCLUDE_PRIVATE = process.env.INCLUDE_PRIVATE === 'true';
 
 // WHAT IS DRAWN: whole connected components, chosen by whether one PR in them is
 // mine.
@@ -231,7 +227,7 @@ export function decorateEdge(edge, mine, includePrivate) {
   }
   return edge;
 }
-const markAuthor = edge => decorateEdge(edge, isMine, INCLUDE_PRIVATE);
+const markAuthor = edge => decorateEdge(edge, isMine, false);
 
 // One PR, as this build carries it around. The GitHub list endpoint and the
 // single-PR endpoint both produce this, so a candidate found in a repo listing
@@ -269,15 +265,41 @@ export function prRecord(full, repo, meta) {
   };
 }
 
-// Somebody else's PR that the component rule pulls onto the page from a PRIVATE
-// repo. It keeps its number and its link, and loses everything else: no title, no
-// author, no repo name -- the same deal a private edge TARGET has always had.
-//
-// It also loses its BODY, which means it declares no dependencies of its own and
-// contributes no branch names or edge reasons. A node the page cannot even name
-// has no business printing prose out of a private repo, so a hidden node is a
-// number, a link and the one edge that pulled it in. My own private PRs are not
-// drawn at all; they are counted in the withheld notice instead.
+export function publicPrivatePr(full, repo, meta, author) {
+  const login = full?.user?.login;
+  const number = Number(full?.number);
+  if (
+    !meta?.private ||
+    String(login || '').toLowerCase() !== String(author || '').toLowerCase() ||
+    !Number.isInteger(number) ||
+    number < 1
+  )
+    return null;
+  return {
+    key: `${repo}#${number}`,
+    repo,
+    number,
+    title: 'Private PR',
+    url: `https://github.com/${repo}/pull/${number}`,
+    author,
+    avatarUrl: null,
+    createdAt: null,
+    draft: Boolean(full.draft),
+    state: full.draft ? 'draft' : 'open',
+    head: null,
+    headSha: null,
+    base: null,
+    baseRepo: null,
+    mergeable: null,
+    updatedAt: null,
+    body: '',
+    private: true,
+    publicPrivate: true,
+    status: 'open',
+    deps: []
+  };
+}
+
 export function redactPrivate(rec) {
   rec.title = null;
   rec.author = null;
@@ -291,11 +313,15 @@ export function redactPrivate(rec) {
   return rec;
 }
 
-// The dependency edges leaving one PR: its explicit stack parent, then whatever
-// its body declares. Computed once per PR and cached on it, because the component
-// rule asks the same question of candidates as of my own PRs -- forward and
-// backward connectivity have to come from ONE edge definition or the graph ends
-// up with edges that exist in one direction only.
+export function addCandidateRecord(pool, rec, tracked) {
+  if (rec.private && !rec.publicPrivate) {
+    if (tracked(rec.author)) return null;
+    redactPrivate(rec);
+  }
+  if (!pool.has(rec.key)) pool.set(rec.key, rec);
+  return pool.get(rec.key);
+}
+
 export async function resolveDeps(pr, repoMeta) {
   if (pr.deps) return pr.deps;
   pr.deps = [];
@@ -522,7 +548,8 @@ async function main() {
     const repo = item.repository_url.split('/repos/')[1];
     const full = await getPr(repo, item.number);
     if (!full) continue;
-    fetched.push(prRecord(full, repo, repoMeta.get(repo)));
+    const meta = repoMeta.get(repo);
+    fetched.push(publicPrivatePr(full, repo, meta, AUTHOR) || prRecord(full, repo, meta));
   }
   // The search said open; the payload is what actually decides. See seedRecords().
   const { seed, stale } = seedRecords(fetched);
@@ -549,10 +576,9 @@ async function main() {
     );
   }
 
-  // A tracked author's private-repo PR is WITHHELD and counted, never redacted
-  // and drawn. Same deal for the bot as for me: the page says the work exists and
-  // says nothing else about it.
-  const withheldAll = seed.filter(p => isTracked(p.author) && p.private && !INCLUDE_PRIVATE);
+  const withheldAll = seed.filter(
+    p => isTracked(p.author) && p.private && !p.publicPrivate
+  );
 
   // --- the search space, and why it is this and not "the org" -----------
   //
@@ -565,14 +591,7 @@ async function main() {
   // transitively and in either direction, to a PR of mine. Bodies come with the
   // list endpoint, so asking every candidate for its edges is nearly free.
   const pool = new Map();
-  const addCandidate = rec => {
-    if (rec.private && !INCLUDE_PRIVATE) {
-      if (isTracked(rec.author)) return null; // withheld, and counted as withheld
-      redactPrivate(rec);
-    }
-    if (!pool.has(rec.key)) pool.set(rec.key, rec);
-    return pool.get(rec.key);
-  };
+  const addCandidate = rec => addCandidateRecord(pool, rec, isTracked);
   for (const p of seed) addCandidate(p);
 
   const scanned = new Set();
@@ -583,7 +602,7 @@ async function main() {
     // A private repo is not swept for candidates on a public build: every PR
     // found there would be drawn as a bare number, and a page that cannot name
     // them has no business pulling more of them in.
-    if (meta.private && !INCLUDE_PRIVATE) return;
+    if (meta.private) return;
     for (const p of await openPrsInRepo(name)) addCandidate(prRecord(p, name, meta));
   };
 
@@ -701,7 +720,7 @@ async function main() {
     ...workflow.needsTony.map(item => [item.key, 'needs_tony'])
   ]);
   for (const node of graph.nodes) node.reviewHandoff = handoffByKey.get(node.key) || null;
-  for (const pr of [...drawnMine, ...drawnBot]) {
+  for (const pr of [...drawnMine, ...drawnBot].filter(pr => !pr.publicPrivate)) {
     const prChecks = await getChecks(pr.repo, pr.headSha);
     const baseSha = await getBranchHead(pr.repo, pr.base);
     const baseChecks = baseSha ? await getChecks(pr.repo, baseSha) : [];
@@ -806,17 +825,6 @@ async function main() {
 // would instead cost the page its one defining property -- that it loads nothing
 // at view time -- and would hand GitHub the IP of every visitor to a public page.
 //
-// THE PRIVACY RULE, and it is the only rule here that matters:
-//
-//   a hidden card contributes NO avatar, and no avatar is fetched for it.
-//
-// An avatar is authorship in a second channel. It survives the name being
-// stripped, it is a picture of who opened a withheld PR, and the redaction
-// scanner cannot see it -- that scanner matches repo names, and an avatar URL
-// carries none. So hidden cards are skipped here as well as blanked upstream in
-// redactPrivate() and decorateEdge(): three independent places, because this is
-// the failure this page has already had twice by other means.
-//
 // The ids are `av1`, `av2`, ... and never the handle. An id built from a login
 // would put the author's name back into the markup of a card that spent the rest
 // of its existence not printing it.
@@ -827,7 +835,7 @@ async function main() {
 export async function collectAvatars(nodes, fetchAvatar) {
   const byUrl = new Map();
   for (const n of nodes || []) {
-    if (n.hidden || !n.avatarUrl) continue;
+    if (n.hidden || n.publicPrivate || !n.avatarUrl) continue;
     if (!byUrl.has(n.avatarUrl)) byUrl.set(n.avatarUrl, { id: null, href: null });
   }
 
@@ -842,7 +850,7 @@ export async function collectAvatars(nodes, fetchAvatar) {
   }
 
   for (const n of nodes || []) {
-    const rec = !n.hidden && n.avatarUrl ? byUrl.get(n.avatarUrl) : null;
+    const rec = !n.hidden && !n.publicPrivate && n.avatarUrl ? byUrl.get(n.avatarUrl) : null;
     n.avatarId = rec && rec.id ? rec.id : null;
   }
   return defs;
@@ -1047,6 +1055,7 @@ export function buildGraph(prs, mine = () => true, trail = [], bot = () => false
       // two is `kind`, which the outline reads.
       foreign: Boolean(pr.author) && !own,
       hidden: Boolean(pr.hidden),
+      publicPrivate: Boolean(pr.publicPrivate),
       // Both already nulled on a hidden record by redactPrivate(). Carried
       // through rather than re-derived, so there is ONE place a withheld card
       // loses its face and its date.

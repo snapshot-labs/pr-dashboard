@@ -15,12 +15,6 @@
 #      Anything else -- a new failure, a missing privacy test, a short run --
 #      stops the publish.
 #
-#   2. redaction-scan.py reads dist/index.html, the actual bytes about to be
-#      pushed, and refuses on any reference to a private repo. The page has
-#      leaked private repo names twice; build.mjs's redactPrivate() and the
-#      suite both check the CODE, and this checks the OUTPUT, deliberately by a
-#      different mechanism.
-#
 # Both fail closed: if the guard scripts are missing, or GitHub cannot be
 # reached to run the checks, this script exits non-zero and publishes nothing.
 # "I could not check" is not "it is clean".
@@ -35,11 +29,6 @@ cd "$(dirname "$0")"
 root=$(pwd)
 export GH_TOKEN="${GH_TOKEN:-$(gh auth token)}"
 
-# The single switch that turns the leak on. Set explicitly rather than
-# inherited: a stray INCLUDE_PRIVATE=true left in a shell or a unit file is
-# exactly how the public page ends up naming private repos.
-export INCLUDE_PRIVATE=false
-
 PMP_DIR="${PMP_DIR:-/root/pr-merge-poller}"
 
 # One publish at a time. `node build.mjs` writes dist/index.html and the next
@@ -53,6 +42,7 @@ if ! flock -w 600 9; then
   exit 1
 fi
 
+"$PMP_DIR/redaction-scan.py" --selftest
 "$PMP_DIR/test-triage.py"
 node build.mjs
 "$PMP_DIR/redaction-scan.py" dist/index.html
