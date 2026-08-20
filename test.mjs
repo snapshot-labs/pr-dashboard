@@ -1618,6 +1618,7 @@ await t('there is no per-PR listing under the drawing any more', () => {
   assert.match(html, new RegExp(`href="#${nodeDomId(waiting.key)}"`));
   assert.match(html, new RegExp(`<g id="${nodeDomId(waiting.key)}"`));
   assert.match(html, /waiting for Wan review/);
+  assert.match(html, /class="mark m-review-waiting"/);
   assert.doesNotMatch(html, /class="badge/, 'and none of the badges those rows carried');
   assert.doesNotMatch(html, /The list below is not a running order/);
   assert.doesNotMatch(html, /listed by number, not in merge order/);
