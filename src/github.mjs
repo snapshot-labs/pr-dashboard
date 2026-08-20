@@ -185,9 +185,9 @@ export async function getReviewInventory(author, org) {
         nodes {
           ... on PullRequest {
             number
+            isDraft
             reviewDecision
-            headRefOid
-            repository { nameWithOwner }
+            repository { nameWithOwner isPrivate }
             reviewRequests(first: 100) {
               totalCount
               nodes {
@@ -204,7 +204,7 @@ export async function getReviewInventory(author, org) {
                 author { login }
                 state
                 submittedAt
-                commit { oid }
+                body
               }
             }
             reviewThreads(first: 100) {
@@ -247,9 +247,10 @@ export async function getReviewInventory(author, org) {
     throw new Error(`review inventory was truncated at ${nodes.length} of ${search.issueCount} PRs`);
 
   const complete = (connection, label) => {
-    if ((connection?.totalCount || 0) > (connection?.nodes || []).length)
-      throw new Error(`${label} was truncated at ${(connection?.nodes || []).length} of ${connection.totalCount}`);
-    return connection?.nodes || [];
+    const nodes = connection?.nodes || [];
+    if ((connection?.totalCount || 0) > nodes.length)
+      throw new Error(`${label} was truncated at ${nodes.length} of ${connection.totalCount}`);
+    return nodes;
   };
 
   return nodes.map(node => {
@@ -259,8 +260,9 @@ export async function getReviewInventory(author, org) {
     const threads = complete(node.reviewThreads, `${key} review threads`);
     return {
       key,
+      isDraft: Boolean(node.isDraft),
+      isPrivate: Boolean(node.repository.isPrivate),
       reviewDecision: node.reviewDecision,
-      headSha: node.headRefOid,
       reviewRequests: requests
         .map(request => request.requestedReviewer)
         .filter(Boolean)
@@ -273,7 +275,7 @@ export async function getReviewInventory(author, org) {
         author: review.author?.login || null,
         state: review.state,
         submittedAt: review.submittedAt,
-        commitSha: review.commit?.oid || null
+        body: review.body || ''
       })),
       threads: threads.map((thread, index) => ({
         isResolved: thread.isResolved,

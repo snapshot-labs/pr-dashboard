@@ -101,13 +101,14 @@ import { classify } from './src/ci.mjs';
 import { openPrState, PR_STATES, prState } from './src/state.mjs';
 import { layoutGraph, shortRef } from './src/graph.mjs';
 import { render } from './src/render.mjs';
-import { reviewQueues } from './src/reviews.mjs';
+import { reviewFingerprint, reviewQueues } from './src/reviews.mjs';
 
 export { shortRef };
 
 const AUTHOR = process.env.PR_AUTHOR || 'tony8713';
 const ORG = process.env.PR_ORG || 'snapshot-labs';
 const REVIEWER = process.env.PR_REVIEWER || 'wa0x6e';
+const EXPECTED_REVIEW_FINGERPRINT = process.env.PR_REVIEW_EXPECTED_FINGERPRINT || null;
 
 // TRACKED AUTHORS: whose open PRs SEED this page.
 //
@@ -684,11 +685,22 @@ async function main() {
   const drawnMine = graph.nodes.filter(n => n.kind === 'own').map(n => n.pr);
   const drawnBot = graph.nodes.filter(n => n.kind === 'bot').map(n => n.pr);
   const reviewInventory = await getReviewInventory(AUTHOR, ORG);
+  const reviewHash = reviewFingerprint(reviewInventory, AUTHOR, REVIEWER);
+  if (EXPECTED_REVIEW_FINGERPRINT && reviewHash !== EXPECTED_REVIEW_FINGERPRINT) {
+    throw new Error(
+      `review state changed during publication: expected ${EXPECTED_REVIEW_FINGERPRINT}, got ${reviewHash}`
+    );
+  }
   const workflow = reviewQueues(drawnMine, reviewInventory, AUTHOR, REVIEWER);
   console.log(
     `review handoff: ${workflow.waitingForWan.length} waiting for @${REVIEWER}, ` +
-      `${workflow.needsTony.length} need ${AUTHOR} to address feedback`
+      `${workflow.needsTony.length} need ${AUTHOR} to address feedback; fingerprint ${reviewHash.slice(0, 12)}`
   );
+  const handoffByKey = new Map([
+    ...workflow.waitingForWan.map(item => [item.key, 'waiting_wan']),
+    ...workflow.needsTony.map(item => [item.key, 'needs_tony'])
+  ]);
+  for (const node of graph.nodes) node.reviewHandoff = handoffByKey.get(node.key) || null;
   for (const pr of [...drawnMine, ...drawnBot]) {
     const prChecks = await getChecks(pr.repo, pr.headSha);
     const baseSha = await getBranchHead(pr.repo, pr.base);

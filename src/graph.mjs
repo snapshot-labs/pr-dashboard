@@ -292,6 +292,8 @@ export function nodeState(n) {
 // else: a card that is careful not to print a private repo name must not print
 // one in the reason it is blocked either.
 export const blockedRef = b => (b.hidden ? `#${b.number}` : shortRef(b.repo, b.number));
+export const nodeDomId = key =>
+  `pr-${String(key).replace(/[^A-Za-z0-9_-]/g, char => `_${char.charCodeAt(0).toString(16)}_`)}`;
 
 export function nodeMarks(n, hold) {
   const out = [];
@@ -304,6 +306,10 @@ export function nodeMarks(n, hold) {
     const refs = n.blockedBy.map(blockedRef).join(', ');
     out.push({ role: 'critical', glyph: '⊗', text: `blocked: ${refs} closed unmerged` });
   }
+  if (n.reviewHandoff === 'waiting_wan')
+    out.push({ role: 'review-waiting', glyph: '◷', text: 'waiting for Wan review' });
+  else if (n.reviewHandoff === 'needs_tony')
+    out.push({ role: 'review-addressing', glyph: '!', text: 'Tony: address review feedback' });
   if (n.hidden) out.push({ role: 'foreign', glyph: '◇', text: 'private repo' });
   else if (n.kind !== 'own') {
     if (!n.author) out.push({ role: 'foreign', glyph: '?', text: 'author unknown' });
@@ -362,6 +368,8 @@ export function nodeTitleText(n) {
   if (n.kind === 'own' || n.kind === 'bot') {
     if (n.pr && n.pr.ci) bits.push(CI_LABEL[n.pr.ci.state] || 'CI state unknown');
   }
+  if (n.reviewHandoff === 'waiting_wan') bits.push('waiting for Wan review');
+  else if (n.reviewHandoff === 'needs_tony') bits.push('Tony must address review feedback');
   if (n.hidden) bits.push('private repo, details withheld');
   else if (n.kind === 'bot')
     bits.push(`@${n.author} — a tracked bot's PR, drawn and scheduled like the page author's`);
@@ -1009,10 +1017,14 @@ export function graphSvg(graph, ids = {}) {
     const body = n.hidden
       ? inner.join('')
       : `<a href="${esc(n.url)}" target="_blank" rel="noopener">${inner.join('')}</a>`;
+    const anchor = n.hidden
+      ? '<g class="node-anchor">'
+      : `<g id="${esc(nodeDomId(n.key))}" class="node-anchor">`;
     out.push(
-      `<g class="node ${n.kind === 'bot' ? 'bot' : n.kind === 'own' ? 'own' : 'dep'} ` +
+      anchor +
+        `<g class="node ${n.kind === 'bot' ? 'bot' : n.kind === 'own' ? 'own' : 'dep'} ` +
         `${c.state.cls}">` +
-        `<title>${esc(nodeTitleText(n))}</title>${body}</g>`
+        `<title>${esc(nodeTitleText(n))}</title>${body}</g></g>`
     );
   }
 
@@ -1072,6 +1084,9 @@ svg.depgraph .mark{font:9.5px ui-sans-serif,system-ui,sans-serif;fill:var(--ink2
 svg.depgraph .mark .g{font-family:ui-monospace,monospace}
 svg.depgraph .mark.m-critical{fill:var(--critical-ink);font-weight:700}
 svg.depgraph .mark.m-foreign{fill:var(--ink2);font-weight:600}
+svg.depgraph .mark.m-review-waiting{fill:var(--warning-ink);font-weight:700}
+svg.depgraph .mark.m-review-addressing{fill:var(--serious-ink);font-weight:700}
+svg.depgraph .node-anchor:target .node .box{stroke:var(--ink);stroke-width:3}
 svg.depgraph .edge{stroke:var(--ink2)}
 svg.depgraph .edge.cross{stroke-dasharray:5 4}
 /* An arrow whose tail has already landed. Lighter, and labelled -- the label is

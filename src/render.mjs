@@ -39,7 +39,7 @@
 // stylesheet does not spill the prose back over the drawing, and the drawing
 // precedes every folded block in source order either way.
 
-import { esc, graphCss, graphSvg, layoutGraph, nodeState, shortRef } from './graph.mjs';
+import { esc, graphCss, graphSvg, layoutGraph, nodeDomId, nodeState, shortRef } from './graph.mjs';
 import { STATE_GLYPH, STATE_WORD } from './state.mjs';
 
 // The card-fill key.
@@ -73,39 +73,42 @@ export function renderReviewHandoff(
   author = 'tony8713',
   reviewer = 'wa0x6e'
 ) {
-  const cards = (items, kind) =>
+  const references = (items, kind) =>
     items.length
       ? `<ol class="handoff-list">${items
-          .map(
-            item => `<li>
-<a class="handoff-card ${kind}" href="${esc(item.url)}" target="_blank" rel="noopener">
-<span class="handoff-ref">${esc(shortRef(item.repo, item.number))}</span>
-<strong>${esc(item.title || 'Title unavailable')}</strong>
+          .map(item => {
+            const ref = shortRef(item.repo, item.number);
+            return `<li>
+<a class="handoff-link ${kind}" href="#${esc(nodeDomId(item.key))}" aria-label="Find ${esc(
+              ref
+            )} in the dependency graph">
+<span class="handoff-ref">${esc(ref)}</span>
 <span class="handoff-reason">${esc(
               kind === 'waiting' ? item.waitingReason : item.addressingReason
             )}</span>
 </a>
-</li>`
-          )
+</li>`;
+          })
           .join('\n')}</ol>`
       : '<p class="handoff-empty">None right now.</p>';
 
   return `<section class="handoff" aria-labelledby="handoff-title">
 <h2 id="handoff-title">Review handoff</h2>
+<p class="handoff-note">Status only. Links jump to the canonical dependency cards below.</p>
 <div class="handoff-grid">
 <section class="handoff-column waiting" aria-labelledby="waiting-title">
 <h3 id="waiting-title">Waiting for Wan <span>${waitingForWan.length}</span></h3>
 <p>Review is requested from <code>@${esc(
     reviewer
   )}</code>, or reapproval is needed, and no current approval from Wan satisfies it.</p>
-${cards(waitingForWan, 'waiting')}
+${references(waitingForWan, 'waiting')}
 </section>
 <section class="handoff-column addressing" aria-labelledby="addressing-title">
 <h3 id="addressing-title">Tony to address <span>${needsTony.length}</span></h3>
-<p>At least one review thread is unresolved, or a changes-requested review has not been followed by a re-review request from <code>@${esc(
+<p>Unresolved thread, substantive top-level review comment, or changes requested without a later handoff from <code>@${esc(
     author
   )}</code>.</p>
-${cards(needsTony, 'addressing')}
+${references(needsTony, 'addressing')}
 </section>
 </div>
 </section>`;
@@ -272,7 +275,8 @@ h1{font-size:20px;margin:0 0 4px}
 .sub{color:var(--ink2);font-size:13px;margin:0 0 16px}
 a{color:inherit}
 .handoff{max-width:940px;margin:24px 0 30px}
-.handoff h2{font-size:17px;margin:0 0 10px}
+.handoff h2{font-size:17px;margin:0 0 4px}
+.handoff-note{color:var(--ink2);font-size:12px;margin:0 0 10px}
 .handoff-grid{display:grid;grid-template-columns:repeat(2,minmax(280px,1fr));gap:12px}
 .handoff-column{border:1px solid var(--rule);border-top:3px solid var(--warning);
   border-radius:7px;background:var(--raised);padding:14px}
@@ -283,13 +287,13 @@ a{color:inherit}
   padding:0 7px;text-align:center;font-size:12px}
 .handoff-column>p{color:var(--ink2);font-size:12px;margin:0 0 12px}
 .handoff-list{display:grid;gap:7px;list-style:none;margin:0;padding:0}
-.handoff-card{display:grid;gap:2px;border:1px solid var(--rule);border-left:3px solid var(--warning);
-  border-radius:5px;padding:8px 10px;text-decoration:none;background:var(--surface)}
-.handoff-card.addressing{border-left-color:var(--serious)}
-.handoff-card:hover{border-color:var(--ink2);border-left-color:var(--warning)}
-.handoff-card.addressing:hover{border-left-color:var(--serious)}
-.handoff-ref{font:11px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink2)}
-.handoff-card strong{font-size:13px;line-height:1.35}
+.handoff-link{display:grid;grid-template-columns:minmax(90px,auto) 1fr;gap:8px;
+  border:1px solid var(--rule);border-left:3px solid var(--warning);border-radius:5px;
+  padding:7px 9px;text-decoration:none;background:var(--surface)}
+.handoff-link:hover,.handoff-link:focus{border-color:var(--ink2);border-left-color:var(--warning)}
+.handoff-link.addressing,.handoff-link.addressing:hover,.handoff-link.addressing:focus{
+  border-left-color:var(--serious)}
+.handoff-ref{font:600 11px/1.3 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--ink)}
 .handoff-reason{font-size:11px;color:var(--ink2)}
 .handoff-empty{border:1px dashed var(--rule);border-radius:5px;padding:10px;text-align:center}
 @media (max-width:700px){.handoff-grid{grid-template-columns:1fr}}

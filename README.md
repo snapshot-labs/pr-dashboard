@@ -4,7 +4,7 @@ Open PRs across `snapshot-labs`, with a review handoff board and a dependency gr
 node per PR, however many edges that PR is on. Static HTML, no server, no database, and nothing
 loaded at runtime: `./publish.sh` runs `node build.mjs` and publishes `dist/index.html`. On the
 operating server it is called manually and by the five-minute PR poller when one of Tony's PRs opens,
-merges, changes draft state, or moves between review classifications.
+merges, changes draft state, or changes its review fingerprint.
 
 ## Which way the graph points
 
@@ -79,24 +79,30 @@ block in source order, so even a renderer that showed every block open would sho
 
 ## Review handoff
 
-Two workflow columns sit above the dependency graph. They are not graph ranks and they do not imply
-merge order.
+Two workflow lanes sit above the dependency graph. They are status indexes, not graph ranks or a
+second merge order. Each compact reference jumps to the PR's canonical graph card, where the review
+handoff status is printed alongside the PR's existing dependency position. Titles and dependency
+cards are not duplicated in the lanes.
 
-**Waiting for Wan** contains Tony-authored open PRs for which `wa0x6e` is requested, or a dismissed
-approval requires reapproval, provided no current Wan approval satisfies the request and Tony has no
-uncleared feedback on that PR. A resolved changes-requested review does not leave the PR in Tony's
-column once every review thread is resolved and Wan has been requested again. It moves to Waiting
-for Wan instead, even while GitHub's aggregate `reviewDecision` remains stale.
+**Waiting for Wan** contains Tony-authored open PRs for which `wa0x6e` is requested, or a prior Wan
+approval no longer satisfies an aggregate `REVIEW_REQUIRED` state. A current Wan approval clears the
+lane, and Tony must have no uncleared feedback on that PR. Aggregate `REVIEW_REQUIRED` alone does not
+assign a PR to Wan when there is no Wan request or prior Wan review. A resolved changes-requested
+review does not leave the PR in Tony's lane once every review thread is resolved and Wan has been
+requested again. It moves to Waiting for Wan instead, even while GitHub's aggregate
+`reviewDecision` remains stale.
 
-**Tony to address** contains Tony-authored open PRs with an unresolved external review thread, or a
-reviewer's latest deciding review is `CHANGES_REQUESTED` and that reviewer has not been requested
-again. A thread containing only Tony's own notes is not external feedback. This column takes
-precedence, so a PR cannot appear in both workflow columns.
+**Tony to address** contains Tony-authored open PRs with an unresolved external review thread, a
+substantive top-level `COMMENTED` review that has not been followed by a re-review request or later
+deciding review, or a reviewer's latest deciding review is `CHANGES_REQUESTED` and that reviewer has
+not been requested again. A thread containing only Tony's own notes is not external feedback. This
+lane takes precedence, so a PR cannot appear in both workflow lanes.
 
-The build reads review requests, the append-only review log and thread-resolution state from one
-GraphQL inventory. Each reviewer's latest deciding state wins; `COMMENTED` does not erase an earlier
-approval or changes request. The workflow board is built only from the same public Tony-authored PR
-records that survived the graph's privacy filter. Private inventory records never reach the renderer.
+The build reads review requests, review bodies, the append-only review log and thread-resolution
+state from one GraphQL inventory. Each reviewer's latest deciding state wins; an empty `COMMENTED`
+review does not erase an earlier approval or changes request. The workflow lanes are built only from
+the same public Tony-authored PR records that survived the graph's privacy filter. Private inventory
+records never reach the renderer.
 
 ## What a card shows
 
@@ -467,6 +473,7 @@ python3 -m http.server -d dist             # look at it
 | `GH_TOKEN` / `GITHUB_TOKEN` | — | required |
 | `PR_AUTHOR` | `tony8713` | whose PRs, "yours", the open-PR count, the unmarked cards |
 | `PR_REVIEWER` | `wa0x6e` | whose requested review and reapproval state fills the waiting column |
+| `PR_REVIEW_EXPECTED_FINGERPRINT` | unset | poller guard; refuse if the build reads different review state |
 | `PR_BOT_AUTHORS` | `chai3-bot` | comma-separated bots whose open PRs are *also* seeded and anchor components; marked, dotted, counted apart. Set to empty for a page with none |
 | `PR_ORG` | `snapshot-labs` | which org |
 | `INCLUDE_PRIVATE` | `false` | render PRs from private repos |
@@ -525,4 +532,8 @@ git mv .github/build.yml .github/workflows/build.yml
 git commit -m "activate scheduled build" && git push
 ```
 
-Until then nothing rebuilds on a schedule; `./publish.sh` refreshes the published page by hand.
+The GitHub Action remains inactive. The operating server's five-minute poller performs the scheduled
+refresh instead. It fingerprints review requests, aggregate decisions, submitted review activity and
+unresolved-thread state. A changed fingerprint invokes the same full `./publish.sh` path, and the
+build must reproduce the poller's expected fingerprint before it may push `gh-pages`. A failed or
+racing publication remains queued and retries on the next tick.

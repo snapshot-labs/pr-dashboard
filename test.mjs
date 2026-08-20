@@ -30,6 +30,7 @@ import {
   layoutGraph,
   NODE_H,
   NODE_W,
+  nodeDomId,
   nodeState,
   nodeTitleText,
   rankCensus,
@@ -43,7 +44,9 @@ import { render, renderReviewHandoff } from './src/render.mjs';
 import {
   classifyReviewState,
   latestDecisions,
+  reviewFingerprint,
   reviewQueues,
+  reviewSnapshot,
   unresolvedFeedback
 } from './src/reviews.mjs';
 import { getAvatar, getPr } from './src/github.mjs';
@@ -177,16 +180,19 @@ await t('one target declared twice, in two spellings, is one declaration', () =>
 console.log('review handoff classification');
 const reviewState = over => ({
   key: 'snapshot-labs/stamp#1',
+  isDraft: false,
+  isPrivate: false,
   reviewDecision: 'REVIEW_REQUIRED',
   reviewRequests: [],
   reviews: [],
   threads: [],
   ...over
 });
-const submitted = (author, state, minute = 0) => ({
+const submitted = (author, state, minute = 0, over = {}) => ({
   author,
   state,
-  submittedAt: `2026-08-19T12:${String(minute).padStart(2, '0')}:00Z`
+  submittedAt: `2026-08-19T12:${String(minute).padStart(2, '0')}:00Z`,
+  ...over
 });
 const requested = login => ({ kind: 'User', login, slug: null });
 
@@ -204,12 +210,28 @@ await t('a Wan review request with no current approval waits for Wan', () => {
   assert.equal(result.needsAddressing, false);
   assert.equal(result.waitingReason, 'review requested');
 });
+await t('aggregate review required alone does not assign the PR to Wan', () => {
+  const result = classifyReviewState(reviewState({ reviewDecision: 'REVIEW_REQUIRED' }));
+  assert.equal(result.waitingForReview, false);
+  assert.equal(result.needsAddressing, false);
+});
 await t('a current Wan approval clears the waiting column', () => {
   const result = classifyReviewState(
-    reviewState({ reviews: [submitted('wa0x6e', 'APPROVED', 1)] })
+    reviewState({
+      reviewDecision: 'APPROVED',
+      reviews: [submitted('wa0x6e', 'APPROVED', 1)]
+    })
   );
   assert.equal(result.reviewerApproved, true);
   assert.equal(result.waitingForReview, false);
+});
+await t('aggregate review required makes a historical Wan approval need reapproval', () => {
+  const result = classifyReviewState(
+    reviewState({ reviews: [submitted('wa0x6e', 'APPROVED', 1)] })
+  );
+  assert.equal(result.reviewerApproved, false);
+  assert.equal(result.waitingForReview, true);
+  assert.equal(result.waitingReason, 'reapproval needed');
 });
 await t('a re-request makes a historical Wan approval pending again', () => {
   const result = classifyReviewState(
@@ -247,6 +269,38 @@ await t('an unresolved thread with an unknown author is not treated as Tony-only
   assert.equal(unresolvedFeedback(pr, 'tony8713').length, 1);
   assert.equal(classifyReviewState(pr).needsAddressing, true);
 });
+await t('a substantive top-level review comment needs Tony', () => {
+  const pr = reviewState({
+    reviewDecision: null,
+    reviews: [submitted('wa0x6e', 'COMMENTED', 1, { body: 'Please handle this case.' })]
+  });
+  const result = classifyReviewState(pr);
+  assert.equal(result.needsAddressing, true);
+  assert.equal(result.addressingReason, '1 unresolved top-level review comment');
+});
+await t('re-requesting or receiving a deciding review clears a top-level comment', () => {
+  const comment = submitted('wa0x6e', 'COMMENTED', 1, { body: 'Please handle this case.' });
+  const requestedAgain = classifyReviewState(
+    reviewState({ reviewRequests: [requested('wa0x6e')], reviews: [comment] })
+  );
+  assert.equal(requestedAgain.needsAddressing, false);
+  assert.equal(requestedAgain.waitingForReview, true);
+
+  const approved = classifyReviewState(
+    reviewState({
+      reviewDecision: 'APPROVED',
+      reviews: [comment, submitted('wa0x6e', 'APPROVED', 2)]
+    })
+  );
+  assert.equal(approved.needsAddressing, false);
+  assert.equal(approved.reviewerApproved, true);
+});
+await t('an empty COMMENTED review does not invent top-level feedback', () => {
+  const result = classifyReviewState(
+    reviewState({ reviewDecision: null, reviews: [submitted('wa0x6e', 'COMMENTED', 1)] })
+  );
+  assert.equal(result.needsAddressing, false);
+});
 await t('uncleared CHANGES_REQUESTED needs Tony', () => {
   const result = classifyReviewState(
     reviewState({
@@ -280,24 +334,44 @@ await t('a dismissed Wan approval can require reapproval', () => {
 await t('workflow queues are disjoint and newest first', () => {
   const visible = [
     { key: 'snapshot-labs/stamp#1', repo: 'snapshot-labs/stamp', number: 1, updatedAt: '2026-08-18' },
-    { key: 'snapshot-labs/stamp#2', repo: 'snapshot-labs/stamp', number: 2, updatedAt: '2026-08-19' }
+    { key: 'snapshot-labs/stamp#2', repo: 'snapshot-labs/stamp', number: 2, updatedAt: '2026-08-19' },
+    { key: 'snapshot-labs/stamp#3', repo: 'snapshot-labs/stamp', number: 3, updatedAt: '2026-08-20' },
+    { key: 'snapshot-labs/stamp#4', repo: 'snapshot-labs/stamp', number: 4, updatedAt: '2026-08-21' }
   ];
   const inventory = [
     reviewState({ key: visible[0].key, reviewRequests: [requested('wa0x6e')] }),
+    reviewState({ key: visible[1].key, reviewRequests: [requested('wa0x6e')] }),
     reviewState({
-      key: visible[1].key,
-      reviewRequests: [requested('wa0x6e')],
+      key: visible[2].key,
+      threads: [{ isResolved: false, comments: [{ author: 'wa0x6e' }] }]
+    }),
+    reviewState({
+      key: visible[3].key,
       threads: [{ isResolved: false, comments: [{ author: 'wa0x6e' }] }]
     })
   ];
   const queues = reviewQueues(visible, inventory);
-  assert.deepEqual(queues.waitingForWan.map(item => item.number), [1]);
-  assert.deepEqual(queues.needsTony.map(item => item.number), [2]);
+  assert.deepEqual(queues.waitingForWan.map(item => item.number), [2, 1]);
+  assert.deepEqual(queues.needsTony.map(item => item.number), [4, 3]);
+});
+await t('review fingerprint is canonical across public state and private withholding', () => {
+  const publicPr = reviewState({
+    reviewDecision: 'CHANGES_REQUESTED',
+    reviewRequests: [requested('wa0x6e')],
+    reviews: [submitted('wa0x6e', 'CHANGES_REQUESTED', 0)],
+    threads: [{ isResolved: true, comments: [{ author: 'wa0x6e' }, { author: 'tony8713' }] }]
+  });
+  const privatePr = reviewState({ key: 'snapshot-labs/private#2', isPrivate: true });
+  const snapshot = reviewSnapshot([privatePr, publicPr]);
+  assert.deepEqual(snapshot[privatePr.key], { private: true, workflow: 'withheld' });
+  assert.equal(snapshot[publicPr.key].workflow, 'waiting_wan');
+  assert.equal(reviewFingerprint([privatePr, publicPr]), '0f23ae9e39a57e9fe5df7c4ae54f56906a726a80f4e8013b9afa74298b525f19');
 });
 await t('review handoff renders both meanings and links', () => {
   const html = renderReviewHandoff({
     waitingForWan: [
       {
+        key: 'snapshot-labs/stamp#1',
         repo: 'snapshot-labs/stamp',
         number: 1,
         title: 'Ready to review',
@@ -307,6 +381,7 @@ await t('review handoff renders both meanings and links', () => {
     ],
     needsTony: [
       {
+        key: 'snapshot-labs/stamp#2',
         repo: 'snapshot-labs/stamp',
         number: 2,
         title: 'Needs a fix',
@@ -317,11 +392,16 @@ await t('review handoff renders both meanings and links', () => {
   });
   assert.match(html, /Waiting for Wan <span>1<\/span>/);
   assert.match(html, /Tony to address <span>1<\/span>/);
+  assert.match(html, /Status only\. Links jump to the canonical dependency cards below\./);
   assert.match(html, /reapproval is needed, and no current approval from Wan satisfies it/);
-  assert.match(html, /changes-requested review has not been followed by a re-review request/);
+  assert.match(html, /substantive top-level review comment/);
+  assert.match(html, /changes requested without a later handoff/);
   assert.match(html, /stamp#1/);
   assert.match(html, /1 unresolved review thread/);
-  assert.equal(html.split('target="_blank" rel="noopener"').length - 1, 2);
+  assert.match(html, /href="#pr-snapshot-labs_2f_stamp_23_1"/);
+  assert.match(html, /href="#pr-snapshot-labs_2f_stamp_23_2"/);
+  assert.doesNotMatch(html, /Ready to review|Needs a fix/);
+  assert.doesNotMatch(html, /target="_blank"/);
 });
 await t('review handoff cannot render inventory outside the visible public nodes', () => {
   const visible = [
@@ -778,14 +858,15 @@ const edge = (repo, number, over = {}) => ({
   foreign: false,
   ...over
 });
-const page = graph =>
+const page = (graph, over = {}) =>
   render({
     graph,
     author: 'tony8713',
     org: 'snapshot-labs',
     generatedAt: '2026-01-01T00:00:00Z',
     withheld: { count: 0, referenced: 0, blocking: 0 },
-    total: graph.nodes.filter(n => n.kind === 'own').length
+    total: graph.nodes.filter(n => n.kind === 'own').length,
+    ...over
   });
 
 console.log('ONE node per PR, however many edges it is on');
@@ -1521,12 +1602,22 @@ await t('there is no per-PR listing under the drawing any more', () => {
     sp(504),
     sp(1225, [], JS)
   ]);
-  const html = page(g);
+  const waiting = g.nodes.find(node => node.key === `${S}#491`);
+  waiting.reviewHandoff = 'waiting_wan';
+  const html = page(g, {
+    workflow: {
+      waitingForWan: [{ ...waiting, waitingReason: 'review requested' }],
+      needsTony: []
+    }
+  });
   assert.doesNotMatch(html, /<ul class="tree/, 'no list');
   assert.doesNotMatch(html, /<div class="pr/, 'no per-PR rows');
   assert.doesNotMatch(html, /<ul class="edges">/, 'no per-PR edge list');
   assert.equal(occurrences(html, '<h2'), 1, 'the only h2 is the review handoff, not a repo heading');
   assert.match(html, /<h2 id="handoff-title">Review handoff<\/h2>/);
+  assert.match(html, new RegExp(`href="#${nodeDomId(waiting.key)}"`));
+  assert.match(html, new RegExp(`<g id="${nodeDomId(waiting.key)}"`));
+  assert.match(html, /waiting for Wan review/);
   assert.doesNotMatch(html, /class="badge/, 'and none of the badges those rows carried');
   assert.doesNotMatch(html, /The list below is not a running order/);
   assert.doesNotMatch(html, /listed by number, not in merge order/);
