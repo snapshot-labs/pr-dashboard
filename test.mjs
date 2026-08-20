@@ -6,6 +6,8 @@ import {
   accountWithheld,
   addCandidateRecord,
   authoritativeOpenPr,
+  authoritativeOpenPrList,
+  authoritativeRepoMeta,
   assertExpectedFingerprint,
   buildGraph,
   collectAvatars,
@@ -206,11 +208,11 @@ const submitted = (author, state, minute = 0, over = {}) => ({
 });
 const requested = login => ({ kind: 'User', login, slug: null });
 
-await t('latest deciding review wins while COMMENTED leaves the verdict intact', () => {
+await t('a later COMMENTED review leaves the latest deciding verdict intact', () => {
   const latest = latestDecisions([
     submitted('wa0x6e', 'CHANGES_REQUESTED', 1),
-    submitted('wa0x6e', 'COMMENTED', 2),
-    submitted('wa0x6e', 'APPROVED', 3)
+    submitted('wa0x6e', 'APPROVED', 2),
+    submitted('wa0x6e', 'COMMENTED', 3, { hasBody: true })
   ]);
   assert.equal(latest.get('wa0x6e').state, 'APPROVED');
 });
@@ -291,13 +293,14 @@ await t('an unresolved thread with an unknown author is not treated as Tony-only
   assert.equal(unresolvedFeedback(pr, 'tony8713').length, 1);
   assert.equal(classifyReviewState(pr).needsAddressing, true);
 });
-await t('a substantive top-level review comment needs Tony', () => {
+await t('a nonempty top-level COMMENTED review is actionable without inspecting its text', () => {
   const pr = reviewState({
     reviewDecision: null,
-    reviews: [submitted('wa0x6e', 'COMMENTED', 1, { body: 'Please handle this case.' })]
+    reviews: [submitted('wa0x6e', 'COMMENTED', 1, { hasBody: true })]
   });
   const result = classifyReviewState(pr);
   assert.equal(result.needsAddressing, true);
+  assert.deepEqual(result.unclearedComments, ['wa0x6e']);
   assert.equal(result.addressingReason, '1 unresolved top-level review comment');
 });
 await t('re-requesting or receiving a deciding review clears a top-level comment', () => {
@@ -972,15 +975,47 @@ await t('authoritative inventory keeps a PR through a close and reopen race', ()
   const inventory = {
     key: `${PRIVATE_REPO}#34`,
     author: 'tony8713',
+    body: 'Depends on #33',
+    baseRefName: 'feat/parent-a',
+    defaultBranch: 'main-a',
+    headRefName: 'feat/child-a',
     headRefOid: 'inventory-head',
+    headRepo: PRIVATE_REPO,
     isDraft: false,
     isPrivate: false
   };
   const rec = authoritativeOpenPr(full, inventory, { private: false }, 'tony8713');
   assert.equal(rec.state, 'open');
   assert.equal(rec.status, 'open');
-  assert.equal(rec.headSha, 'inventory-head');
+  assert.deepEqual(
+    [rec.body, rec.base, rec.baseRepo, rec.head, rec.headRepo, rec.headSha],
+    ['Depends on #33', 'feat/parent-a', PRIVATE_REPO, 'feat/child-a', PRIVATE_REPO, 'inventory-head']
+  );
   assert.deepEqual(seedRecords([rec]), { seed: [rec], stale: [] });
+
+  const restB = {
+    ...full,
+    body: 'Depends on #999',
+    base: { ref: 'feat/parent-b', repo: { full_name: PRIVATE_REPO } },
+    head: { ref: 'feat/child-b', sha: 'rest-head-b', repo: { full_name: 'fork/stamp' } }
+  };
+  const [bound] = authoritativeOpenPrList(
+    [restB],
+    PRIVATE_REPO,
+    new Map([[inventory.key, inventory]])
+  );
+  assert.deepEqual(
+    [bound.body, bound.base.ref, bound.base.repo.full_name, bound.head.ref, bound.head.repo.full_name, bound.head.sha],
+    ['Depends on #33', 'feat/parent-a', PRIVATE_REPO, 'feat/child-a', PRIVATE_REPO, 'inventory-head']
+  );
+  assert.deepEqual(
+    authoritativeRepoMeta(
+      PRIVATE_REPO,
+      { private: true, default_branch: 'main-b' },
+      new Map([[PRIVATE_REPO, { private: false, defaultBranch: 'main-a' }]])
+    ),
+    { name: PRIVATE_REPO, private: false, defaultBranch: 'main-a' }
+  );
 
   const privateRec = authoritativeOpenPr(
     { ...privateFull(), state: 'closed' },
@@ -998,10 +1033,18 @@ await t('review inventory queries all tracked authors and preserves dismissal hi
   const node = {
     number: 34,
     author: { login: 'tony8713' },
+    body: 'Depends on #33',
+    baseRefName: 'feat/review-parent',
+    headRefName: 'feat/review-columns',
     headRefOid: 'head-current',
+    headRepository: { nameWithOwner: 'snapshot-labs/stamp' },
     isDraft: false,
     reviewDecision: null,
-    repository: { nameWithOwner: 'snapshot-labs/stamp', isPrivate: false },
+    repository: {
+      nameWithOwner: 'snapshot-labs/stamp',
+      isPrivate: false,
+      defaultBranchRef: { name: 'master' }
+    },
     reviewRequests: { totalCount: 0, nodes: [] },
     reviews: {
       totalCount: 1,
@@ -1037,43 +1080,104 @@ await t('review inventory queries all tracked authors and preserves dismissal hi
       () => getReviewInventory(['tony8713', 'chai3-bot'], 'snapshot-labs'),
       /review dismissals were truncated at 100/
     );
+    node.timelineItems.pageInfo.hasNextPage = false;
+    node.author = null;
+    await assert.rejects(
+      () => getReviewInventory(['tony8713', 'chai3-bot'], 'snapshot-labs'),
+      /authoritative review inventory returned an authorless PR: snapshot-labs\/stamp#34/
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   assert.equal(
     calls[0].variables.query,
     'is:pr is:open author:tony8713 author:chai3-bot org:snapshot-labs'
   );
-  assert.equal(inventory[0].reviews[0].dismissedState, 'CHANGES_REQUESTED');
+  for (const field of [
+    'body',
+    'baseRefName',
+    'headRefName',
+    'headRepository { nameWithOwner }',
+    'defaultBranchRef { name }'
+  ]) {
+    assert.equal(calls[0].query.includes(field), true, `authoritative inventory queries ${field}`);
+  }
+  assert.deepEqual(inventory, [
+    {
+      key: 'snapshot-labs/stamp#34',
+      author: 'tony8713',
+      body: 'Depends on #33',
+      baseRefName: 'feat/review-parent',
+      defaultBranch: 'master',
+      headRefName: 'feat/review-columns',
+      headRefOid: 'head-current',
+      headRepo: 'snapshot-labs/stamp',
+      isDraft: false,
+      isPrivate: false,
+      reviewDecision: null,
+      reviewRequests: [],
+      reviews: [
+        {
+          author: 'wa0x6e',
+          state: 'DISMISSED',
+          commitOid: 'head-current',
+          dismissedState: 'CHANGES_REQUESTED',
+          submittedAt: '2026-08-19T12:00:00Z',
+          hasBody: false
+        }
+      ],
+      threads: []
+    }
+  ]);
 });
 await t('graph fingerprint binds every tracked open PR but not foreign inventory', () => {
   const records = [
     {
       key: 'snapshot-labs/stamp#1',
       author: 'tony8713',
+      body: 'Depends on #7',
+      baseRefName: 'feat/parent',
+      defaultBranch: 'master',
+      headRefName: 'feat/child',
       headRefOid: 'head-current',
+      headRepo: 'snapshot-labs/stamp',
       isDraft: false,
       isPrivate: false
     },
     {
       key: 'snapshot-labs/private#2',
       author: 'tony8713',
-      headRefOid: 'private-head',
+      body: 'PRIVATE_BODY_SENTINEL',
+      baseRefName: 'PRIVATE_BASE_SENTINEL',
+      defaultBranch: 'PRIVATE_DEFAULT_SENTINEL',
+      headRefName: 'PRIVATE_HEAD_SENTINEL',
+      headRefOid: 'PRIVATE_SHA_SENTINEL',
+      headRepo: 'snapshot-labs/private',
       isDraft: true,
       isPrivate: true
     },
     {
       key: 'snapshot-labs/bot#3',
       author: 'chai3-bot',
+      body: 'BOT body',
+      baseRefName: 'master',
+      defaultBranch: 'master',
+      headRefName: 'dependabot/npm',
       headRefOid: 'bot-head',
+      headRepo: 'snapshot-labs/bot',
       isDraft: false,
       isPrivate: false
     },
     {
       key: 'snapshot-labs/foreign#4',
       author: 'wa0x6e',
+      body: 'FOREIGN_BODY_SENTINEL',
+      baseRefName: 'master',
+      defaultBranch: 'master',
+      headRefName: 'foreign',
       headRefOid: 'foreign-head',
+      headRepo: 'snapshot-labs/foreign',
       isDraft: false,
       isPrivate: false
     }
@@ -1083,29 +1187,74 @@ await t('graph fingerprint binds every tracked open PR but not foreign inventory
     'snapshot-labs/bot#3': {
       author: 'chai3-bot',
       draft: false,
+      private: false,
+      base_ref: 'master',
+      body_sha256: 'f3a7f54c09092b9ea2ee0e9822bd1e518cba874e3034cbfb7a39bd9303eeccac',
+      default_branch: 'master',
       head_oid: 'bot-head',
-      private: false
+      head_ref: 'dependabot/npm',
+      head_repo: 'snapshot-labs/bot'
     },
     'snapshot-labs/private#2': {
       author: 'tony8713',
       draft: true,
-      head_oid: 'private-head',
       private: true
     },
     'snapshot-labs/stamp#1': {
       author: 'tony8713',
       draft: false,
+      private: false,
+      base_ref: 'feat/parent',
+      body_sha256: '4b1ef2ed11abcca27a917b4fee7965b3fd568fa73f9da6eafd1e871a862b6852',
+      default_branch: 'master',
       head_oid: 'head-current',
-      private: false
+      head_ref: 'feat/child',
+      head_repo: 'snapshot-labs/stamp'
     }
   };
+  const changed = (key, patch) => records.map(record => (record.key === key ? { ...record, ...patch } : record));
   assert.deepEqual(graphSnapshot(records, authors), expected);
+  assert.doesNotMatch(JSON.stringify(graphSnapshot(records, authors)), /PRIVATE_[A-Z_]*SENTINEL/);
   assert.equal(
     graphFingerprint(records, authors),
-    'feb7e5a78d5f0c7cb3bcf2a9e8907427d3ac56f2f71e9a5aa019141156b9bc09'
+    'f97efddc7e67acd134771b346bb900fc3e8c1e1bfab4dd2f5d24597f4657b811'
   );
   assert.equal(graphFingerprint(records, authors), graphFingerprint([...records].reverse(), authors));
   assert.notEqual(graphFingerprint(records, authors), graphFingerprint(records.slice(0, 2), authors));
+  assert.notEqual(
+    graphFingerprint(records, authors),
+    graphFingerprint(changed('snapshot-labs/stamp#1', { body: 'Depends on #8' }), authors)
+  );
+  assert.notEqual(
+    graphFingerprint(records, authors),
+    graphFingerprint(changed('snapshot-labs/stamp#1', { baseRefName: 'master' }), authors)
+  );
+  assert.notEqual(
+    graphFingerprint(records, authors),
+    graphFingerprint(changed('snapshot-labs/stamp#1', { defaultBranch: 'develop' }), authors)
+  );
+  assert.notEqual(
+    graphFingerprint(records, authors),
+    graphFingerprint(changed('snapshot-labs/stamp#1', { headRefName: 'renamed' }), authors)
+  );
+  assert.notEqual(
+    graphFingerprint(records, authors),
+    graphFingerprint(changed('snapshot-labs/stamp#1', { headRepo: 'fork/stamp' }), authors)
+  );
+  assert.equal(
+    graphFingerprint(records, authors),
+    graphFingerprint(
+      changed('snapshot-labs/private#2', {
+        body: 'DIFFERENT_PRIVATE_BODY',
+        baseRefName: 'DIFFERENT_PRIVATE_BASE',
+        defaultBranch: 'DIFFERENT_PRIVATE_DEFAULT',
+        headRefName: 'DIFFERENT_PRIVATE_HEAD',
+        headRefOid: 'DIFFERENT_PRIVATE_SHA',
+        headRepo: 'different/private'
+      }),
+      authors
+    )
+  );
 });
 await t('publication fingerprint guards reject either mismatched snapshot', () => {
   assert.doesNotThrow(() => assertExpectedFingerprint('graph', 'same', 'same'));

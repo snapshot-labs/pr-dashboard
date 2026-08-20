@@ -300,19 +300,62 @@ export function publicPrivatePr(full, repo, meta, author) {
   };
 }
 
+function parsePrKey(key) {
+  const split = key.lastIndexOf('#');
+  return { split, repo: key.slice(0, split), number: Number(key.slice(split + 1)) };
+}
+
+export function authoritativeRepoMeta(name, meta, inventoryByRepo = new Map()) {
+  const inventory = inventoryByRepo.get(name);
+  return {
+    name,
+    private: inventory ? inventory.private : meta ? meta.private : true,
+    defaultBranch: inventory ? inventory.defaultBranch : meta ? meta.default_branch : null
+  };
+}
+
 export function authoritativeOpenPr(full, inventoryPr, meta, author) {
   if (!full || !inventoryPr?.key) return null;
-  const split = inventoryPr.key.lastIndexOf('#');
-  const repo = inventoryPr.key.slice(0, split);
-  const number = Number(inventoryPr.key.slice(split + 1));
+  const { split, repo, number } = parsePrKey(inventoryPr.key);
   if (split < 1 || number !== Number(full.number)) return null;
   const rec = publicPrivatePr(full, repo, meta, author) || prRecord(full, repo, meta);
   rec.author = inventoryPr.author || rec.author;
   rec.draft = Boolean(inventoryPr.isDraft);
   rec.state = rec.draft ? 'draft' : 'open';
   rec.status = 'open';
-  if (!rec.publicPrivate) rec.headSha = inventoryPr.headRefOid || null;
+  if (!rec.publicPrivate) {
+    rec.body = inventoryPr.body || '';
+    rec.base = inventoryPr.baseRefName || null;
+    rec.baseRepo = repo;
+    rec.head = inventoryPr.headRefName || null;
+    rec.headRepo = inventoryPr.headRepo || null;
+    rec.headSha = inventoryPr.headRefOid || null;
+  }
   return rec;
+}
+
+export function authoritativeOpenPrList(siblings, repo, inventoryByKey) {
+  return siblings.map(sibling => {
+    const item = inventoryByKey.get(`${repo}#${sibling.number}`);
+    if (!item || item.isPrivate) return sibling;
+    return {
+      ...sibling,
+      body: item.body || '',
+      base: {
+        ...(sibling.base || {}),
+        ref: item.baseRefName || null,
+        repo: { ...(sibling.base?.repo || {}), full_name: repo }
+      },
+      head: {
+        ...(sibling.head || {}),
+        ref: item.headRefName || null,
+        sha: item.headRefOid || null,
+        repo: item.headRepo
+          ? { ...(sibling.head?.repo || {}), full_name: item.headRepo }
+          : null
+      }
+    };
+  });
 }
 
 export function redactPrivate(rec) {
@@ -337,7 +380,7 @@ export function addCandidateRecord(pool, rec, tracked) {
   return pool.get(rec.key);
 }
 
-export async function resolveDeps(pr, repoMeta) {
+export async function resolveDeps(pr, repoMeta, listOpenPrs = openPrsInRepo) {
   if (pr.deps) return pr.deps;
   pr.deps = [];
   if (pr.hidden) return pr.deps; // see redactPrivate()
@@ -363,7 +406,7 @@ export async function resolveDeps(pr, repoMeta) {
   //      a) a PR based on the repo's default branch is never stacked
   //      b) the parent's head branch must live in the upstream repo itself
   const defaultBranch = repoMeta.get(pr.repo).defaultBranch;
-  const siblings = await openPrsInRepo(pr.repo);
+  const siblings = await listOpenPrs(pr.repo);
   const basePr =
     pr.base === defaultBranch
       ? undefined
@@ -536,6 +579,19 @@ async function main() {
   );
   const reviewHash = reviewFingerprint(authorReviewInventory, AUTHOR, REVIEWER);
   const graphHash = graphFingerprint(reviewInventory, TRACKED_AUTHORS);
+  const inventoryByKey = new Map(reviewInventory.map(pr => [pr.key, pr]));
+  const inventoryByRepo = new Map();
+  for (const item of reviewInventory) {
+    const repo = parsePrKey(item.key).repo;
+    const next = {
+      private: Boolean(item.isPrivate),
+      defaultBranch: item.isPrivate ? null : item.defaultBranch || null
+    };
+    const previous = inventoryByRepo.get(repo);
+    if (previous && JSON.stringify(previous) !== JSON.stringify(next))
+      throw new Error(`authoritative review inventory disagreed on repository metadata for ${repo}`);
+    inventoryByRepo.set(repo, next);
+  }
   assertExpectedFingerprint('review', reviewHash, EXPECTED_REVIEW_FINGERPRINT);
   assertExpectedFingerprint('graph', graphHash, EXPECTED_GRAPH_FINGERPRINT);
   for (const who of TRACKED_AUTHORS) {
@@ -549,23 +605,17 @@ async function main() {
   const loadRepo = async name => {
     if (repoMeta.has(name)) return repoMeta.get(name);
     const meta = await getRepo(name);
-    const rec = {
-      name,
-      private: meta ? meta.private : true,
-      defaultBranch: meta ? meta.default_branch : null
-    };
+    const rec = authoritativeRepoMeta(name, meta, inventoryByRepo);
     repoMeta.set(name, rec);
     return rec;
   };
 
-  const repos = new Set(reviewInventory.map(pr => pr.key.slice(0, pr.key.lastIndexOf('#'))));
+  const repos = new Set(reviewInventory.map(pr => parsePrKey(pr.key).repo));
   for (const repo of repos) await loadRepo(repo);
 
   const fetched = [];
   for (const item of reviewInventory) {
-    const split = item.key.lastIndexOf('#');
-    const repo = item.key.slice(0, split);
-    const number = Number(item.key.slice(split + 1));
+    const { repo, number } = parsePrKey(item.key);
     const full = await getPr(repo, number);
     const rec = authoritativeOpenPr(full, item, repoMeta.get(repo), AUTHOR);
     if (!rec) throw new Error(`authoritative open-PR inventory could not resolve ${item.key}`);
@@ -575,6 +625,8 @@ async function main() {
   if (stale.length) {
     throw new Error(`authoritative open-PR inventory produced stale records: ${stale.join(', ')}`);
   }
+  const authoritativeSiblings = async repo =>
+    authoritativeOpenPrList(await openPrsInRepo(repo), repo, inventoryByKey);
   seed.sort((a, b) => a.repo.localeCompare(b.repo) || a.number - b.number);
 
   // The searches are scoped to the tracked authors, so this reclassifies nothing
@@ -627,7 +679,7 @@ async function main() {
   let trail = { records: [], visited: [], stale: [], truncated: false };
   for (let pass = 1; ; pass++) {
     for (const name of new Set([...pool.values()].map(p => p.repo))) await scanRepo(name);
-    for (const p of pool.values()) await resolveDeps(p, repoMeta);
+    for (const p of pool.values()) await resolveDeps(p, repoMeta, authoritativeSiblings);
 
     // A candidate on no dependency edge at all was never in a chain, so it is not
     // something the component rule "left out" -- it is simply somebody else's

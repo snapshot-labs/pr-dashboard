@@ -209,26 +209,43 @@ export function graphSnapshot(prs, authors = ['tony8713']) {
     [...(prs || [])]
       .filter(pr => tracked.has(String(pr.author || '').toLowerCase()))
       .sort((a, b) => a.key.localeCompare(b.key))
-      .map(pr => [
-        pr.key,
-        {
+      .map(pr => {
+        const common = {
           author: pr.author ? String(pr.author).toLowerCase() : null,
           draft: Boolean(pr.isDraft),
-          head_oid: pr.headRefOid || null,
           private: Boolean(pr.isPrivate)
-        }
-      ])
+        };
+        if (pr.isPrivate) return [pr.key, common];
+        return [
+          pr.key,
+          {
+            ...common,
+            base_ref: pr.baseRefName || null,
+            body_sha256: sha256(pr.body || ''),
+            default_branch: pr.defaultBranch || null,
+            head_oid: pr.headRefOid || null,
+            head_ref: pr.headRefName || null,
+            head_repo: pr.headRepo || null
+          }
+        ];
+      })
   );
 }
 
+function sha256(value) {
+  return createHash('sha256').update(String(value)).digest('hex');
+}
+
+function fingerprint(value) {
+  return sha256(JSON.stringify(canonical(value)));
+}
+
 export function graphFingerprint(prs, authors = ['tony8713']) {
-  const json = JSON.stringify(canonical(graphSnapshot(prs, authors)));
-  return createHash('sha256').update(json).digest('hex');
+  return fingerprint(graphSnapshot(prs, authors));
 }
 
 export function reviewFingerprint(prs, author = 'tony8713', reviewer = 'wa0x6e') {
-  const json = JSON.stringify(canonical(reviewSnapshot(prs, author, reviewer)));
-  return createHash('sha256').update(json).digest('hex');
+  return fingerprint(reviewSnapshot(prs, author, reviewer));
 }
 
 export function reviewQueues(nodes, inventory, author = 'tony8713', reviewer = 'wa0x6e') {

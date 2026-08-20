@@ -281,8 +281,7 @@ export function nodeState(n) {
 // keeps its number and loses its repo name here exactly as it does everywhere
 // else: a card that is careful not to print a private repo name must not print
 // one in the reason it is blocked either.
-export const blockedRef = b =>
-  b.publicPrivate ? 'Private PR' : b.hidden ? `#${b.number}` : shortRef(b.repo, b.number);
+export const blockedRef = nodeRef;
 export const nodeDomId = key => `pr-${Buffer.from(String(key), 'utf8').toString('base64url')}`;
 export const privateNodeDomId = key =>
   `private-pr-${createHash('sha256').update(String(key)).digest('hex')}`;

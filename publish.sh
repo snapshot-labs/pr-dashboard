@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Rebuild and republish the GitHub Pages copy.
 #
-# Two gates stand between `node build.mjs` and the force-push, and they are
+# Publication checks stand between `node build.mjs` and the force-push, and they are
 # HERE rather than in whatever calls this script, so that the hand-run and the
 # pr-merge-poller's automated run cannot diverge. One publish implementation,
 # one place the checks live, nothing to bypass:
@@ -15,15 +15,15 @@
 #      Anything else -- a new failure, a missing privacy test, a short run --
 #      stops the publish.
 #
-# Both fail closed: if the guard scripts are missing, or GitHub cannot be
+# The checks fail closed: if the guard scripts are missing, or GitHub cannot be
 # reached to run the checks, this script exits non-zero and publishes nothing.
 # "I could not check" is not "it is clean".
 #
 # NOTE FOR A CI RUNNER: PMP_DIR below is a path on the box this dashboard is
 # operated from. .github/build.yml (still parked, not installed) does not call
 # this script -- it runs test.mjs and build.mjs itself -- so activating that
-# workflow does not require these guards on the runner. If it is ever pointed
-# at this script, port the two guards with it.
+# workflow does not require these checks on the runner. If it is ever pointed
+# at this script, port the checks with it.
 set -euo pipefail
 cd "$(dirname "$0")"
 root=$(pwd)

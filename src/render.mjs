@@ -91,9 +91,7 @@ export function renderReviewHandoff(
               ? kind === 'waiting'
                 ? 'review pending'
                 : 'review feedback pending'
-              : kind === 'waiting'
-                ? item.waitingReason
-                : item.addressingReason;
+              : item[kind === 'waiting' ? 'waitingReason' : 'addressingReason'];
             return `<li>
 <a class="handoff-link ${kind}" href="#${esc(nodeAnchorId(item))}" aria-label="Find ${esc(
               ref

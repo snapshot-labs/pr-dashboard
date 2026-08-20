@@ -98,13 +98,16 @@ deciding review, or a reviewer's latest deciding review is `CHANGES_REQUESTED` a
 not been requested again. A thread containing only Tony's own notes is not external feedback. This
 lane takes precedence, so a PR cannot appear in both workflow lanes.
 
-The build reads review requests, review bodies, the append-only review log and thread-resolution
-state from one GraphQL inventory. Each reviewer's latest deciding state wins; an empty `COMMENTED`
-review does not erase an earlier approval or changes request. A dismissal keeps the dismissed review's
-prior state: dismissing an approval can require reapproval, while dismissing a changes request clears
-that feedback without inventing a Wan handoff. The workflow lanes are built only from
-the same Tony-authored PR records that survived the graph's privacy filter. Tony's private inventory
-records have already been reduced to neutral fields. Other private records never reach the renderer.
+The build reads review requests, the presence of a non-whitespace review body, the append-only review
+log and thread-resolution state from one GraphQL inventory. That presence flag is the only
+machine-readable signal that a top-level `COMMENTED` review has substance; the prose is not
+interpreted, retained in a fingerprint or passed into graph and render processing. Each reviewer's
+latest deciding state wins; an empty `COMMENTED` review does not erase an earlier approval or changes
+request. A dismissal keeps the dismissed review's prior state: dismissing an approval can require
+reapproval, while dismissing a changes request clears that feedback without inventing a Wan handoff.
+The workflow lanes are built only from the same Tony-authored PR records that survived the graph's
+privacy filter. Tony's private inventory records have already been reduced to neutral fields. Other
+private records never reach the renderer.
 
 ## What a card shows
 

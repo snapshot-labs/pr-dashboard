@@ -187,10 +187,14 @@ export async function getReviewInventory(author, org) {
           ... on PullRequest {
             number
             author { login }
+            body
+            baseRefName
+            headRefName
             headRefOid
+            headRepository { nameWithOwner }
             isDraft
             reviewDecision
-            repository { nameWithOwner isPrivate }
+            repository { nameWithOwner isPrivate defaultBranchRef { name } }
             reviewRequests(first: 100) {
               totalCount
               nodes {
@@ -271,6 +275,9 @@ export async function getReviewInventory(author, org) {
 
   return nodes.map(node => {
     const key = `${node.repository.nameWithOwner}#${node.number}`;
+    if (!node.author?.login)
+      throw new Error(`authoritative review inventory returned an authorless PR: ${key}`);
+    const isPrivate = Boolean(node.repository.isPrivate);
     const requests = complete(node.reviewRequests, `${key} review requests`);
     const reviews = complete(node.reviews, `${key} reviews`);
     if (node.timelineItems?.pageInfo?.hasNextPage)
@@ -284,9 +291,14 @@ export async function getReviewInventory(author, org) {
     return {
       key,
       author: node.author?.login || null,
+      body: isPrivate ? null : node.body || '',
+      baseRefName: isPrivate ? null : node.baseRefName || null,
+      defaultBranch: isPrivate ? null : node.repository.defaultBranchRef?.name || null,
+      headRefName: isPrivate ? null : node.headRefName || null,
       headRefOid: node.headRefOid,
+      headRepo: isPrivate ? null : node.headRepository?.nameWithOwner || null,
       isDraft: Boolean(node.isDraft),
-      isPrivate: Boolean(node.repository.isPrivate),
+      isPrivate,
       reviewDecision: node.reviewDecision,
       reviewRequests: requests
         .map(request => request.requestedReviewer)
