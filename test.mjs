@@ -995,6 +995,10 @@ await t('authoritative inventory keeps a PR through a close and reopen race', ()
 
   const restB = {
     ...full,
+    state: 'closed',
+    merged: true,
+    merged_at: '2026-08-20T00:00:00Z',
+    draft: true,
     body: 'Depends on #999',
     base: { ref: 'feat/parent-b', repo: { full_name: PRIVATE_REPO } },
     head: { ref: 'feat/child-b', sha: 'rest-head-b', repo: { full_name: 'fork/stamp' } }
@@ -1005,8 +1009,30 @@ await t('authoritative inventory keeps a PR through a close and reopen race', ()
     new Map([[inventory.key, inventory]])
   );
   assert.deepEqual(
-    [bound.body, bound.base.ref, bound.base.repo.full_name, bound.head.ref, bound.head.repo.full_name, bound.head.sha],
-    ['Depends on #33', 'feat/parent-a', PRIVATE_REPO, 'feat/child-a', PRIVATE_REPO, 'inventory-head']
+    [
+      bound.state,
+      bound.merged,
+      bound.merged_at,
+      bound.draft,
+      bound.body,
+      bound.base.ref,
+      bound.base.repo.full_name,
+      bound.head.ref,
+      bound.head.repo.full_name,
+      bound.head.sha
+    ],
+    [
+      'open',
+      false,
+      null,
+      false,
+      'Depends on #33',
+      'feat/parent-a',
+      PRIVATE_REPO,
+      'feat/child-a',
+      PRIVATE_REPO,
+      'inventory-head'
+    ]
   );
   assert.deepEqual(
     authoritativeRepoMeta(
@@ -1026,6 +1052,94 @@ await t('authoritative inventory keeps a PR through a close and reopen race', ()
   assert.equal(privateRec.state, 'open');
   assert.equal(privateRec.headSha, null);
   assert.doesNotMatch(JSON.stringify(privateRec), /PRIVATE_[A-Z_]*SENTINEL/);
+});
+await t('authoritative inventory restores a tracked stack parent missing from the REST list', async () => {
+  const repo = 'snapshot-labs/stamp';
+  const item = {
+    key: `${repo}#33`,
+    author: 'tony8713',
+    body: '',
+    baseRefName: 'master',
+    defaultBranch: 'master',
+    headRefName: 'feat/parent',
+    headRefOid: 'parent-head',
+    headRepo: repo,
+    isDraft: true,
+    isPrivate: false
+  };
+  const full = {
+    number: 33,
+    title: 'Tracked parent',
+    html_url: `https://github.com/${repo}/pull/33`,
+    user: { login: 'tony8713', avatar_url: null },
+    created_at: '2026-08-19T00:00:00Z',
+    updated_at: '2026-08-20T00:00:00Z',
+    state: 'closed',
+    merged_at: '2026-08-20T00:00:00Z',
+    draft: false,
+    body: 'REST body B',
+    mergeable_state: 'unknown',
+    base: { ref: 'master', repo: { full_name: repo, private: false } },
+    head: { ref: 'rest-parent-b', sha: 'rest-head-b', repo: { full_name: repo } }
+  };
+  const parent = authoritativeOpenPr(full, item, { private: false }, 'tony8713');
+  const siblings = authoritativeOpenPrList(
+    [],
+    repo,
+    new Map([[item.key, item]]),
+    new Map([[item.key, parent]])
+  );
+  assert.equal(siblings.length, 1);
+  assert.deepEqual(
+    [
+      siblings[0].number,
+      siblings[0].state,
+      siblings[0].merged_at,
+      siblings[0].draft,
+      siblings[0].head.ref,
+      siblings[0].head.sha,
+      siblings[0].head.repo.full_name
+    ],
+    [33, 'open', null, true, 'feat/parent', 'parent-head', repo]
+  );
+  const child = {
+    key: `${repo}#34`,
+    repo,
+    number: 34,
+    body: '',
+    base: 'feat/parent',
+    baseRepo: repo
+  };
+  const deps = await resolveDeps(
+    child,
+    new Map([[repo, { name: repo, private: false, defaultBranch: 'master' }]]),
+    async () => siblings
+  );
+  assert.deepEqual(
+    deps.map(dep => [dep.number, dep.targetState]),
+    [[33, 'draft']]
+  );
+
+  const privateItem = {
+    ...item,
+    key: `${PRIVATE_REPO}#34`,
+    isPrivate: true
+  };
+  const privateRec = authoritativeOpenPr(
+    privateFull(),
+    privateItem,
+    { private: true },
+    'tony8713'
+  );
+  assert.deepEqual(
+    authoritativeOpenPrList(
+      [],
+      PRIVATE_REPO,
+      new Map([[privateItem.key, privateItem]]),
+      new Map([[privateItem.key, privateRec]])
+    ),
+    []
+  );
 });
 await t('review inventory queries all tracked authors and preserves dismissal history', async () => {
   const originalFetch = globalThis.fetch;
@@ -1094,8 +1208,11 @@ await t('review inventory queries all tracked authors and preserves dismissal hi
     calls[0].variables.query,
     'is:pr is:open author:tony8713 author:chai3-bot org:snapshot-labs'
   );
+  assert.match(
+    calls[0].query,
+    /\.\.\. on PullRequest \{\s+number\s+author \{ login \}\s+body\s+baseRefName/
+  );
   for (const field of [
-    'body',
     'baseRefName',
     'headRefName',
     'headRepository { nameWithOwner }',

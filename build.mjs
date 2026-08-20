@@ -334,28 +334,63 @@ export function authoritativeOpenPr(full, inventoryPr, meta, author) {
   return rec;
 }
 
-export function authoritativeOpenPrList(siblings, repo, inventoryByKey) {
-  return siblings.map(sibling => {
-    const item = inventoryByKey.get(`${repo}#${sibling.number}`);
-    if (!item || item.isPrivate) return sibling;
-    return {
-      ...sibling,
-      body: item.body || '',
-      base: {
-        ...(sibling.base || {}),
-        ref: item.baseRefName || null,
-        repo: { ...(sibling.base?.repo || {}), full_name: repo }
-      },
-      head: {
-        ...(sibling.head || {}),
-        ref: item.headRefName || null,
-        sha: item.headRefOid || null,
-        repo: item.headRepo
-          ? { ...(sibling.head?.repo || {}), full_name: item.headRepo }
-          : null
-      }
-    };
+export function authoritativeOpenPrList(
+  siblings,
+  repo,
+  inventoryByKey,
+  authoritativeByKey = new Map()
+) {
+  const bind = (sibling, item) => ({
+    ...sibling,
+    state: 'open',
+    merged: false,
+    merged_at: null,
+    draft: Boolean(item.isDraft),
+    body: item.body || '',
+    user: { ...(sibling.user || {}), login: item.author },
+    base: {
+      ...(sibling.base || {}),
+      ref: item.baseRefName || null,
+      repo: { ...(sibling.base?.repo || {}), full_name: repo, private: false }
+    },
+    head: {
+      ...(sibling.head || {}),
+      ref: item.headRefName || null,
+      sha: item.headRefOid || null,
+      repo: item.headRepo
+        ? { ...(sibling.head?.repo || {}), full_name: item.headRepo }
+        : null
+    }
   });
+  const out = siblings.map(sibling => {
+    const item = inventoryByKey.get(`${repo}#${sibling.number}`);
+    return !item || item.isPrivate ? sibling : bind(sibling, item);
+  });
+  const present = new Set(out.map(sibling => Number(sibling.number)));
+  for (const [key, item] of inventoryByKey) {
+    const parsed = parsePrKey(key);
+    if (parsed.repo !== repo || item.isPrivate || present.has(parsed.number)) continue;
+    const rec = authoritativeByKey.get(key);
+    if (!rec || rec.publicPrivate || rec.hidden) continue;
+    out.push(
+      bind(
+        {
+          number: rec.number,
+          title: rec.title,
+          html_url: rec.url,
+          user: { login: rec.author, avatar_url: rec.avatarUrl },
+          created_at: rec.createdAt,
+          updated_at: rec.updatedAt,
+          mergeable_state: rec.mergeable,
+          base: { repo: { full_name: repo, private: false } },
+          head: {}
+        },
+        item
+      )
+    );
+    present.add(parsed.number);
+  }
+  return out;
 }
 
 export function redactPrivate(rec) {
@@ -625,8 +660,14 @@ async function main() {
   if (stale.length) {
     throw new Error(`authoritative open-PR inventory produced stale records: ${stale.join(', ')}`);
   }
+  const authoritativeByKey = new Map(fetched.map(pr => [pr.key, pr]));
   const authoritativeSiblings = async repo =>
-    authoritativeOpenPrList(await openPrsInRepo(repo), repo, inventoryByKey);
+    authoritativeOpenPrList(
+      await openPrsInRepo(repo),
+      repo,
+      inventoryByKey,
+      authoritativeByKey
+    );
   seed.sort((a, b) => a.repo.localeCompare(b.repo) || a.number - b.number);
 
   // The searches are scoped to the tracked authors, so this reclassifies nothing
