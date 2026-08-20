@@ -93,15 +93,14 @@ import {
   getReleases,
   getRepo,
   getReviewInventory,
-  openPrsInRepo,
-  searchOpenPrs
+  openPrsInRepo
 } from './src/github.mjs';
 import { parseDeclarations } from './src/declarations.mjs';
 import { classify } from './src/ci.mjs';
 import { openPrState, PR_STATES, prState } from './src/state.mjs';
 import { layoutGraph, shortRef } from './src/graph.mjs';
 import { render } from './src/render.mjs';
-import { reviewFingerprint, reviewQueues } from './src/reviews.mjs';
+import { graphFingerprint, reviewFingerprint, reviewQueues } from './src/reviews.mjs';
 
 export { shortRef };
 
@@ -109,6 +108,7 @@ const AUTHOR = process.env.PR_AUTHOR || 'tony8713';
 const ORG = process.env.PR_ORG || 'snapshot-labs';
 const REVIEWER = process.env.PR_REVIEWER || 'wa0x6e';
 const EXPECTED_REVIEW_FINGERPRINT = process.env.PR_REVIEW_EXPECTED_FINGERPRINT || null;
+const EXPECTED_GRAPH_FINGERPRINT = process.env.PR_GRAPH_EXPECTED_FINGERPRINT || null;
 
 // TRACKED AUTHORS: whose open PRs SEED this page.
 //
@@ -298,6 +298,21 @@ export function publicPrivatePr(full, repo, meta, author) {
     status: 'open',
     deps: []
   };
+}
+
+export function authoritativeOpenPr(full, inventoryPr, meta, author) {
+  if (!full || !inventoryPr?.key) return null;
+  const split = inventoryPr.key.lastIndexOf('#');
+  const repo = inventoryPr.key.slice(0, split);
+  const number = Number(inventoryPr.key.slice(split + 1));
+  if (split < 1 || number !== Number(full.number)) return null;
+  const rec = publicPrivatePr(full, repo, meta, author) || prRecord(full, repo, meta);
+  rec.author = inventoryPr.author || rec.author;
+  rec.draft = Boolean(inventoryPr.isDraft);
+  rec.state = rec.draft ? 'draft' : 'open';
+  rec.status = 'open';
+  if (!rec.publicPrivate) rec.headSha = inventoryPr.headRefOid || null;
+  return rec;
 }
 
 export function redactPrivate(rec) {
@@ -508,23 +523,26 @@ export async function expandMergedTrail(seeds, declaredBy, limit = TRAIL_LIMIT) 
   return { records, visited, stale, truncated };
 }
 
+export function assertExpectedFingerprint(kind, actual, expected) {
+  if (expected && actual !== expected) {
+    throw new Error(`${kind} state changed during publication: expected ${expected}, got ${actual}`);
+  }
+}
+
 async function main() {
-  // One search per tracked author rather than one query with two `author:`
-  // qualifiers. GitHub does OR repeated qualifiers, but the page's whole seed set
-  // would then rest on that being true, and it costs one API call to not depend
-  // on it. Deduped by repo#number: an author cannot appear twice, but a future
-  // tracked list with an alias in it could.
-  const found = [];
-  const seenItem = new Set();
+  const reviewInventory = await getReviewInventory(TRACKED_AUTHORS, ORG);
+  const authorReviewInventory = reviewInventory.filter(
+    pr => String(pr.author || '').toLowerCase() === AUTHOR.toLowerCase()
+  );
+  const reviewHash = reviewFingerprint(authorReviewInventory, AUTHOR, REVIEWER);
+  const graphHash = graphFingerprint(reviewInventory, TRACKED_AUTHORS);
+  assertExpectedFingerprint('review', reviewHash, EXPECTED_REVIEW_FINGERPRINT);
+  assertExpectedFingerprint('graph', graphHash, EXPECTED_GRAPH_FINGERPRINT);
   for (const who of TRACKED_AUTHORS) {
-    const items = await searchOpenPrs(who, ORG);
-    console.log(`search: ${items.length} open PRs by ${who} in ${ORG}`);
-    for (const item of items) {
-      const key = `${item.repository_url.split('/repos/')[1]}#${item.number}`;
-      if (seenItem.has(key)) continue;
-      seenItem.add(key);
-      found.push(item);
-    }
+    const count = reviewInventory.filter(
+      pr => String(pr.author || '').toLowerCase() === who.toLowerCase()
+    ).length;
+    console.log(`search: ${count} open PRs by ${who} in ${ORG}`);
   }
 
   const repoMeta = new Map();
@@ -540,24 +558,22 @@ async function main() {
     return rec;
   };
 
-  // --- my own open PRs: the seed ----------------------------------------
-  for (const r of new Set(found.map(i => i.repository_url.split('/repos/')[1]))) await loadRepo(r);
+  const repos = new Set(reviewInventory.map(pr => pr.key.slice(0, pr.key.lastIndexOf('#'))));
+  for (const repo of repos) await loadRepo(repo);
 
   const fetched = [];
-  for (const item of found) {
-    const repo = item.repository_url.split('/repos/')[1];
-    const full = await getPr(repo, item.number);
-    if (!full) continue;
-    const meta = repoMeta.get(repo);
-    fetched.push(publicPrivatePr(full, repo, meta, AUTHOR) || prRecord(full, repo, meta));
+  for (const item of reviewInventory) {
+    const split = item.key.lastIndexOf('#');
+    const repo = item.key.slice(0, split);
+    const number = Number(item.key.slice(split + 1));
+    const full = await getPr(repo, number);
+    const rec = authoritativeOpenPr(full, item, repoMeta.get(repo), AUTHOR);
+    if (!rec) throw new Error(`authoritative open-PR inventory could not resolve ${item.key}`);
+    fetched.push(rec);
   }
-  // The search said open; the payload is what actually decides. See seedRecords().
   const { seed, stale } = seedRecords(fetched);
   if (stale.length) {
-    console.log(
-      `seed: ${stale.length} PR(s) came back from an \`is:open\` search but are no longer ` +
-        `open, so they are not drawn: ${stale.join(', ')}`
-    );
+    throw new Error(`authoritative open-PR inventory produced stale records: ${stale.join(', ')}`);
   }
   seed.sort((a, b) => a.repo.localeCompare(b.repo) || a.number - b.number);
 
@@ -703,17 +719,11 @@ async function main() {
   // is why it is scoped to DRAWN nodes rather than to the pool.
   const drawnMine = graph.nodes.filter(n => n.kind === 'own').map(n => n.pr);
   const drawnBot = graph.nodes.filter(n => n.kind === 'bot').map(n => n.pr);
-  const reviewInventory = await getReviewInventory(AUTHOR, ORG);
-  const reviewHash = reviewFingerprint(reviewInventory, AUTHOR, REVIEWER);
-  if (EXPECTED_REVIEW_FINGERPRINT && reviewHash !== EXPECTED_REVIEW_FINGERPRINT) {
-    throw new Error(
-      `review state changed during publication: expected ${EXPECTED_REVIEW_FINGERPRINT}, got ${reviewHash}`
-    );
-  }
-  const workflow = reviewQueues(drawnMine, reviewInventory, AUTHOR, REVIEWER);
+  const workflow = reviewQueues(drawnMine, authorReviewInventory, AUTHOR, REVIEWER);
   console.log(
     `review handoff: ${workflow.waitingForWan.length} waiting for @${REVIEWER}, ` +
-      `${workflow.needsTony.length} need ${AUTHOR} to address feedback; fingerprint ${reviewHash.slice(0, 12)}`
+      `${workflow.needsTony.length} need ${AUTHOR} to address feedback; ` +
+      `fingerprints review ${reviewHash.slice(0, 12)}, graph ${graphHash.slice(0, 12)}`
   );
   const handoffByKey = new Map([
     ...workflow.waitingForWan.map(item => [item.key, 'waiting_wan']),
@@ -817,21 +827,6 @@ async function main() {
   console.log(`wrote dist/index.html (${html.length} bytes, ${apiCallCount()} API calls)`);
 }
 
-// AUTHOR AVATARS, fetched once per AUTHOR and inlined into the SVG.
-//
-// The economics are the whole argument for inlining. There are twenty cards and
-// three authors, so the cost is three images, not twenty: the bytes go in
-// `<defs>` once each and every card is a `<use>` pointing at one. Hotlinking
-// would instead cost the page its one defining property -- that it loads nothing
-// at view time -- and would hand GitHub the IP of every visitor to a public page.
-//
-// The ids are `av1`, `av2`, ... and never the handle. An id built from a login
-// would put the author's name back into the markup of a card that spent the rest
-// of its existence not printing it.
-//
-// `fetchAvatar(url)` is passed in so this is testable without the network. A url
-// that fails to fetch yields no id, and that card simply has no avatar: the
-// geometry reserves room only when there is one, so nothing shifts either way.
 export async function collectAvatars(nodes, fetchAvatar) {
   const byUrl = new Map();
   for (const n of nodes || []) {
@@ -856,30 +851,9 @@ export async function collectAvatars(nodes, fetchAvatar) {
   return defs;
 }
 
-// WHAT STATE A CARD OF ITS OWN MAY BE IN.
-//
-// This page lists OPEN pull requests. Every query it seeds from says so -- the
-// search is `is:pr is:open`, the sweep reads a repo's open PRs -- so in principle
-// nothing else can arrive as a card of its own. In practice two things get past
-// that, and both were live holes:
-//
-//   GitHub's SEARCH INDEX LAGS. A PR closed or merged seconds ago still comes
-//   back from `is:open` for a while. The build then fetches the full payload,
-//   which tells the truth, and believes the search string instead. A merged one
-//   arriving this way trips mergedNonPrerequisites() and FAILS the build, which
-//   is what aborted a publish earlier; a closed one trips nothing at all and is
-//   simply drawn, as a full card, as though it were still work to do.
-//
-// The payload wins. It is the later and more specific fact, and it is the one
-// the card is filled from anyway. Anything not open-or-draft is dropped from the
-// seed and named in the log rather than silently discarded.
 export const SEEDABLE_STATES = ['open', 'draft'];
 export const seedable = rec => SEEDABLE_STATES.includes(rec && rec.state);
 
-// Split what the search returned into what may actually be drawn and what has
-// moved on since the index was written. Separated from main() so the WIRING is
-// testable and not just the predicate: a guard that is never called is the same
-// as no guard, and the first version of this was exactly that.
 export function seedRecords(records) {
   const seed = [];
   const stale = [];

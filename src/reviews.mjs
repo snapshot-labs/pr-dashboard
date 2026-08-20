@@ -4,24 +4,19 @@ const DECIDING_STATES = new Set(['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED']);
 
 function latestByReviewer(reviews, accepts) {
   const latest = new Map();
-  reviews.forEach((review, index) => {
+  reviews.forEach(review => {
     const login = String(review.author || '').toLowerCase();
     const state = String(review.state || '').toUpperCase();
     if (!login || !accepts(review, state)) return;
     const submittedAt = Date.parse(review.submittedAt || '') || 0;
     const previous = latest.get(login);
-    if (
-      previous &&
-      (previous.submittedAt > submittedAt ||
-        (previous.submittedAt === submittedAt && previous.index > index))
-    )
-      return;
+    if (previous && previous.submittedAt > submittedAt) return;
     latest.set(login, {
       login: review.author,
       state,
       commitOid: review.commitOid || null,
-      submittedAt,
-      index
+      dismissedState: review.dismissedState || null,
+      submittedAt
     });
   });
   return latest;
@@ -72,8 +67,10 @@ export function classifyReviewState(pr, author = 'tony8713', reviewer = 'wa0x6e'
     reviewerState === 'APPROVED' &&
     Boolean(pr.headRefOid) &&
     reviewerDecision.commitOid === pr.headRefOid;
+  const dismissedApproval =
+    reviewerState === 'DISMISSED' && reviewerDecision.dismissedState === 'APPROVED';
   const reapprovalNeeded =
-    reviewerState === 'DISMISSED' || (reviewerState === 'APPROVED' && !approvalOnCurrentHead);
+    dismissedApproval || (reviewerState === 'APPROVED' && !approvalOnCurrentHead);
   const reviewerApproved = !reviewerRequested && approvalOnCurrentHead;
   const unresolved = unresolvedFeedback(pr, author);
   const unclearedChanges = [...latest.values()].filter(
@@ -136,6 +133,7 @@ function reviewActivity(reviews = []) {
       (review.reviewer || '').toLowerCase(),
       review.state || '',
       review.commit_oid || '',
+      review.dismissed_state || '',
       review.submitted_at || '',
       String(review.has_body)
     ].join('\0');
@@ -144,6 +142,7 @@ function reviewActivity(reviews = []) {
       reviewer: review.author || null,
       state: review.state || null,
       commit_oid: review.commitOid || null,
+      dismissed_state: review.dismissedState || null,
       submitted_at: review.submittedAt || null,
       has_body: hasReviewBody(review)
     }))
@@ -173,7 +172,8 @@ export function reviewSnapshot(prs, author = 'tony8713', reviewer = 'wa0x6e') {
               .map(review => ({
                 reviewer: review.login,
                 state: review.state,
-                commit_oid: review.commitOid
+                commit_oid: review.commitOid,
+                dismissed_state: review.dismissedState || null
               }))
               .sort((a, b) => a.reviewer.toLowerCase().localeCompare(b.reviewer.toLowerCase())),
             review_states: reviewActivity(pr.reviews),
@@ -201,6 +201,29 @@ function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
+}
+
+export function graphSnapshot(prs, authors = ['tony8713']) {
+  const tracked = new Set((authors || []).map(author => String(author).toLowerCase()));
+  return Object.fromEntries(
+    [...(prs || [])]
+      .filter(pr => tracked.has(String(pr.author || '').toLowerCase()))
+      .sort((a, b) => a.key.localeCompare(b.key))
+      .map(pr => [
+        pr.key,
+        {
+          author: pr.author ? String(pr.author).toLowerCase() : null,
+          draft: Boolean(pr.isDraft),
+          head_oid: pr.headRefOid || null,
+          private: Boolean(pr.isPrivate)
+        }
+      ])
+  );
+}
+
+export function graphFingerprint(prs, authors = ['tony8713']) {
+  const json = JSON.stringify(canonical(graphSnapshot(prs, authors)));
+  return createHash('sha256').update(json).digest('hex');
 }
 
 export function reviewFingerprint(prs, author = 'tony8713', reviewer = 'wa0x6e') {

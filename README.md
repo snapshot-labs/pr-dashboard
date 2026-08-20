@@ -3,8 +3,8 @@
 Open PRs across `snapshot-labs`, with a review handoff board and a dependency graph containing one
 node per PR, however many edges that PR is on. Static HTML, no server, no database, and nothing
 loaded at runtime: `./publish.sh` runs `node build.mjs` and publishes `dist/index.html`. On the
-operating server it is called manually and by the five-minute PR poller when one of Tony's PRs opens,
-merges, changes draft state, or changes its review fingerprint.
+operating server it is called manually and by the five-minute PR poller when tracked graph or review
+state changes.
 
 ## Which way the graph points
 
@@ -100,9 +100,11 @@ lane takes precedence, so a PR cannot appear in both workflow lanes.
 
 The build reads review requests, review bodies, the append-only review log and thread-resolution
 state from one GraphQL inventory. Each reviewer's latest deciding state wins; an empty `COMMENTED`
-review does not erase an earlier approval or changes request. The workflow lanes are built only from
-the same public Tony-authored PR records that survived the graph's privacy filter. Private inventory
-records never reach the renderer.
+review does not erase an earlier approval or changes request. A dismissal keeps the dismissed review's
+prior state: dismissing an approval can require reapproval, while dismissing a changes request clears
+that feedback without inventing a Wan handoff. The workflow lanes are built only from
+the same Tony-authored PR records that survived the graph's privacy filter. Tony's private inventory
+records have already been reduced to neutral fields. Other private records never reach the renderer.
 
 ## What a card shows
 
@@ -118,8 +120,8 @@ card is as tall as its own title. The ref stays, because it is how people refer 
 `href` with `target="_blank"` and `rel="noopener"` — the same attributes an HTML anchor takes, no
 `xlink`. New tab because the graph is a thing you come back to and reading it costs a scroll;
 `noopener` because this page is public, and a tab we opened should not get a window handle back to
-it. A card in a private repo is not a link at all: the `href` would carry the repo name the rest of
-the card is careful not to print.
+it. A neutral Tony-private card keeps one canonical GitHub link, with its repository and number only
+inside that `href`. Anonymous private dependency cards are not links.
 
 Everything else that was a status label is **off the card**: CI wording, the rank badge, the
 `no prerequisites` / `blocked ×N` pair. None of them is a dependency or a merge order, and together
@@ -473,7 +475,8 @@ python3 -m http.server -d dist             # look at it
 | `GH_TOKEN` / `GITHUB_TOKEN` | — | required |
 | `PR_AUTHOR` | `tony8713` | whose PRs, "yours", the open-PR count, the unmarked cards |
 | `PR_REVIEWER` | `wa0x6e` | whose requested review and reapproval state fills the waiting column |
-| `PR_REVIEW_EXPECTED_FINGERPRINT` | unset | poller guard; refuse if the build reads different review state |
+| `PR_REVIEW_EXPECTED_FINGERPRINT` | unset | poller guard; refuse if the build reads different Tony review state |
+| `PR_GRAPH_EXPECTED_FINGERPRINT` | unset | poller guard; refuse if the build reads a different tracked open-PR graph snapshot |
 | `PR_BOT_AUTHORS` | `chai3-bot` | comma-separated bots whose open PRs are *also* seeded and anchor components; marked, dotted, counted apart. Set to empty for a page with none |
 | `PR_ORG` | `snapshot-labs` | which org |
 
@@ -518,8 +521,9 @@ git commit -m "activate scheduled build" && git push
 ```
 
 The GitHub Action remains inactive. The operating server's five-minute poller performs the scheduled
-refresh instead. It fingerprints the head commit, review requests, aggregate decisions, submitted
-review activity with each review's commit, and unresolved-thread state. A changed fingerprint
-invokes the same full `./publish.sh` path, and the
-build must reproduce the poller's expected fingerprint before it may push `gh-pages`. A failed or
-racing publication remains queued and retries on the next tick.
+refresh instead. One GraphQL inventory is the authoritative source for the tracked open-PR graph and
+Tony's review workflow. The build fetches card metadata by the inventory's exact keys, so a close or
+reopen during later REST calls cannot add or omit a card. Separate graph and author-only review
+fingerprints must match the poller's expected values before `gh-pages` may be pushed. A successful
+push remains publication debt until a later poll verifies the same fingerprints and deployed commit;
+a failed, racing or superseded publication retries on the next tick.

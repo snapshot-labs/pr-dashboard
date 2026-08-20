@@ -178,6 +178,7 @@ export async function getAvatar(url, size = 48) {
 }
 
 export async function getReviewInventory(author, org) {
+  const authors = (Array.isArray(author) ? author : [author]).filter(Boolean);
   const query = `
     query($query: String!) {
       search(query: $query, type: ISSUE, first: 100) {
@@ -203,12 +204,22 @@ export async function getReviewInventory(author, org) {
             reviews(first: 100) {
               totalCount
               nodes {
+                id
                 author { login }
                 state
                 commit { oid }
                 submittedAt
                 body
               }
+            }
+            timelineItems(first: 100, itemTypes: [REVIEW_DISMISSED_EVENT]) {
+              nodes {
+                ... on ReviewDismissedEvent {
+                  review { id }
+                  previousReviewState
+                }
+              }
+              pageInfo { hasNextPage }
             }
             reviewThreads(first: 100) {
               totalCount
@@ -235,7 +246,9 @@ export async function getReviewInventory(author, org) {
     },
     body: JSON.stringify({
       query,
-      variables: { query: `is:pr is:open author:${author} org:${org}` }
+      variables: {
+        query: `is:pr is:open ${authors.map(login => `author:${login}`).join(' ')} org:${org}`
+      }
     })
   });
   calls++;
@@ -260,6 +273,13 @@ export async function getReviewInventory(author, org) {
     const key = `${node.repository.nameWithOwner}#${node.number}`;
     const requests = complete(node.reviewRequests, `${key} review requests`);
     const reviews = complete(node.reviews, `${key} reviews`);
+    if (node.timelineItems?.pageInfo?.hasNextPage)
+      throw new Error(`${key} review dismissals were truncated at 100`);
+    const dismissals = new Map(
+      (node.timelineItems?.nodes || [])
+        .filter(event => event?.review?.id)
+        .map(event => [event.review.id, event.previousReviewState || null])
+    );
     const threads = complete(node.reviewThreads, `${key} review threads`);
     return {
       key,
@@ -280,6 +300,7 @@ export async function getReviewInventory(author, org) {
         author: review.author?.login || null,
         state: review.state,
         commitOid: review.commit?.oid || null,
+        dismissedState: dismissals.get(review.id) || null,
         submittedAt: review.submittedAt,
         hasBody: Boolean(review.body?.trim())
       })),

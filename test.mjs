@@ -5,6 +5,8 @@ import { classify } from './src/ci.mjs';
 import {
   accountWithheld,
   addCandidateRecord,
+  authoritativeOpenPr,
+  assertExpectedFingerprint,
   buildGraph,
   collectAvatars,
   componentsOf,
@@ -46,13 +48,15 @@ import {
 import { render, renderReviewHandoff } from './src/render.mjs';
 import {
   classifyReviewState,
+  graphFingerprint,
+  graphSnapshot,
   latestDecisions,
   reviewFingerprint,
   reviewQueues,
   reviewSnapshot,
   unresolvedFeedback
 } from './src/reviews.mjs';
-import { getAvatar, getPr } from './src/github.mjs';
+import { getAvatar, getPr, getReviewInventory } from './src/github.mjs';
 import { openPrState, PR_STATES, prState, STATE_GLYPH } from './src/state.mjs';
 
 let pass = 0;
@@ -344,10 +348,22 @@ await t('resolved threads plus re-review request ignore stale reviewDecision', (
 });
 await t('a dismissed Wan approval can require reapproval', () => {
   const result = classifyReviewState(
-    reviewState({ reviews: [submitted('wa0x6e', 'DISMISSED', 1)] })
+    reviewState({
+      reviews: [submitted('wa0x6e', 'DISMISSED', 1, { dismissedState: 'APPROVED' })]
+    })
   );
   assert.equal(result.waitingForReview, true);
   assert.equal(result.waitingReason, 'reapproval needed');
+});
+await t('a dismissed changes request does not invent a Wan handoff', () => {
+  const result = classifyReviewState(
+    reviewState({
+      reviews: [submitted('wa0x6e', 'DISMISSED', 1, { dismissedState: 'CHANGES_REQUESTED' })]
+    })
+  );
+  assert.equal(result.needsAddressing, false);
+  assert.equal(result.waitingForReview, false);
+  assert.equal(result.reviewerApproved, false);
 });
 await t('workflow queues are disjoint and newest first', () => {
   const visible = [
@@ -443,7 +459,7 @@ await t('review fingerprint is canonical across public and private workflow stat
       publicPr
     ])
   );
-  assert.equal(reviewFingerprint(records), 'a6c4533a16982f69da29fb5e189d8104397b5d1e949ee3d831453965db1c7681');
+  assert.equal(reviewFingerprint(records), '09f58ba2b9b074fc83c4d70073a93fb71649021fcc956038501700ec6655a359');
 });
 await t('review handoff renders both meanings and links', () => {
   const html = renderReviewHandoff({
@@ -950,6 +966,158 @@ await t('Tony private seed is reconstructed from an exact neutral allowlist', ()
   assert.doesNotMatch(JSON.stringify(rec), /PRIVATE_[A-Z_]*SENTINEL/);
   assert.equal(publicPrivatePr(privateFull('chai3-bot'), PRIVATE_REPO, { private: true }, 'tony8713'), null);
   assert.equal(publicPrivatePr(privateFull(), PRIVATE_REPO, { private: false }, 'tony8713'), null);
+});
+await t('authoritative inventory keeps a PR through a close and reopen race', () => {
+  const full = { ...privateFull(), state: 'closed', merged_at: null };
+  const inventory = {
+    key: `${PRIVATE_REPO}#34`,
+    author: 'tony8713',
+    headRefOid: 'inventory-head',
+    isDraft: false,
+    isPrivate: false
+  };
+  const rec = authoritativeOpenPr(full, inventory, { private: false }, 'tony8713');
+  assert.equal(rec.state, 'open');
+  assert.equal(rec.status, 'open');
+  assert.equal(rec.headSha, 'inventory-head');
+  assert.deepEqual(seedRecords([rec]), { seed: [rec], stale: [] });
+
+  const privateRec = authoritativeOpenPr(
+    { ...privateFull(), state: 'closed' },
+    { ...inventory, isPrivate: true },
+    { private: true },
+    'tony8713'
+  );
+  assert.equal(privateRec.state, 'open');
+  assert.equal(privateRec.headSha, null);
+  assert.doesNotMatch(JSON.stringify(privateRec), /PRIVATE_[A-Z_]*SENTINEL/);
+});
+await t('review inventory queries all tracked authors and preserves dismissal history', async () => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  const node = {
+    number: 34,
+    author: { login: 'tony8713' },
+    headRefOid: 'head-current',
+    isDraft: false,
+    reviewDecision: null,
+    repository: { nameWithOwner: 'snapshot-labs/stamp', isPrivate: false },
+    reviewRequests: { totalCount: 0, nodes: [] },
+    reviews: {
+      totalCount: 1,
+      nodes: [
+        {
+          id: 'review-1',
+          author: { login: 'wa0x6e' },
+          state: 'DISMISSED',
+          commit: { oid: 'head-current' },
+          submittedAt: '2026-08-19T12:00:00Z',
+          body: ''
+        }
+      ]
+    },
+    timelineItems: {
+      nodes: [{ review: { id: 'review-1' }, previousReviewState: 'CHANGES_REQUESTED' }],
+      pageInfo: { hasNextPage: false }
+    },
+    reviewThreads: { totalCount: 0, nodes: [] }
+  };
+  globalThis.fetch = async (_url, init) => {
+    calls.push(JSON.parse(init.body));
+    return {
+      ok: true,
+      json: async () => ({ data: { search: { issueCount: 1, nodes: [node] } } })
+    };
+  };
+  let inventory;
+  try {
+    inventory = await getReviewInventory(['tony8713', 'chai3-bot'], 'snapshot-labs');
+    node.timelineItems.pageInfo.hasNextPage = true;
+    await assert.rejects(
+      () => getReviewInventory(['tony8713', 'chai3-bot'], 'snapshot-labs'),
+      /review dismissals were truncated at 100/
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(calls.length, 2);
+  assert.equal(
+    calls[0].variables.query,
+    'is:pr is:open author:tony8713 author:chai3-bot org:snapshot-labs'
+  );
+  assert.equal(inventory[0].reviews[0].dismissedState, 'CHANGES_REQUESTED');
+});
+await t('graph fingerprint binds every tracked open PR but not foreign inventory', () => {
+  const records = [
+    {
+      key: 'snapshot-labs/stamp#1',
+      author: 'tony8713',
+      headRefOid: 'head-current',
+      isDraft: false,
+      isPrivate: false
+    },
+    {
+      key: 'snapshot-labs/private#2',
+      author: 'tony8713',
+      headRefOid: 'private-head',
+      isDraft: true,
+      isPrivate: true
+    },
+    {
+      key: 'snapshot-labs/bot#3',
+      author: 'chai3-bot',
+      headRefOid: 'bot-head',
+      isDraft: false,
+      isPrivate: false
+    },
+    {
+      key: 'snapshot-labs/foreign#4',
+      author: 'wa0x6e',
+      headRefOid: 'foreign-head',
+      isDraft: false,
+      isPrivate: false
+    }
+  ];
+  const authors = ['tony8713', 'chai3-bot'];
+  const expected = {
+    'snapshot-labs/bot#3': {
+      author: 'chai3-bot',
+      draft: false,
+      head_oid: 'bot-head',
+      private: false
+    },
+    'snapshot-labs/private#2': {
+      author: 'tony8713',
+      draft: true,
+      head_oid: 'private-head',
+      private: true
+    },
+    'snapshot-labs/stamp#1': {
+      author: 'tony8713',
+      draft: false,
+      head_oid: 'head-current',
+      private: false
+    }
+  };
+  assert.deepEqual(graphSnapshot(records, authors), expected);
+  assert.equal(
+    graphFingerprint(records, authors),
+    'feb7e5a78d5f0c7cb3bcf2a9e8907427d3ac56f2f71e9a5aa019141156b9bc09'
+  );
+  assert.equal(graphFingerprint(records, authors), graphFingerprint([...records].reverse(), authors));
+  assert.notEqual(graphFingerprint(records, authors), graphFingerprint(records.slice(0, 2), authors));
+});
+await t('publication fingerprint guards reject either mismatched snapshot', () => {
+  assert.doesNotThrow(() => assertExpectedFingerprint('graph', 'same', 'same'));
+  assert.doesNotThrow(() => assertExpectedFingerprint('graph', 'actual', null));
+  assert.throws(
+    () => assertExpectedFingerprint('graph', 'actual', 'expected'),
+    /graph state changed during publication: expected expected, got actual/
+  );
+  assert.throws(
+    () => assertExpectedFingerprint('review', 'actual', 'expected'),
+    /review state changed during publication/
+  );
 });
 await t('main candidate admission keeps neutral Tony private seeds and withholds tracked bots', () => {
   const pool = new Map();
