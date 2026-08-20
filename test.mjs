@@ -5,6 +5,7 @@ import { classify } from './src/ci.mjs';
 import {
   accountWithheld,
   addCandidateRecord,
+  authoritativeCandidatePool,
   authoritativeOpenPr,
   authoritativeOpenPrList,
   authoritativeRepoMeta,
@@ -1395,21 +1396,51 @@ await t('main candidate admission keeps neutral Tony private seeds and withholds
   assert.equal(addCandidateRecord(pool, bot, tracked), null);
   assert.equal(pool.has(bot.key), false);
 });
-await t('authoritative A-to-A admission ignores tracked PRs first seen in the later REST sweep', () => {
+await t('production candidate pool holds tracked and foreign REST records to its inventory boundary', () => {
   const repo = 'snapshot-labs/stamp';
   const tracked = isMineFor(['tony8713', 'chai3-bot']);
   const inventoryKey = `${repo}#1`;
   const inventory = new Map([[inventoryKey, { key: inventoryKey }]]);
-  const pool = new Map();
+  const boundary = Date.parse('2026-08-20T12:00:05Z');
   const known = { key: inventoryKey, repo, number: 1, author: 'tony8713', private: false };
   const newTony = { key: `${repo}#2`, repo, number: 2, author: 'tony8713', private: false };
   const newBot = { key: `${repo}#3`, repo, number: 3, author: 'chai3-bot', private: false };
-  const foreign = { key: `${repo}#4`, repo, number: 4, author: 'wa0x6e', private: false };
+  const foreign = {
+    key: `${repo}#4`,
+    repo,
+    number: 4,
+    author: 'wa0x6e',
+    private: false,
+    createdAt: '2026-08-20T12:00:04Z'
+  };
+  const newForeign = {
+    key: `${repo}#5`,
+    repo,
+    number: 5,
+    author: 'wa0x6e',
+    private: false,
+    createdAt: '2026-08-20T12:00:05Z',
+    base: 'feat/tony'
+  };
 
-  assert.equal(addCandidateRecord(pool, known, tracked, inventory), known);
-  assert.equal(addCandidateRecord(pool, newTony, tracked, inventory), null);
-  assert.equal(addCandidateRecord(pool, newBot, tracked, inventory), null);
-  assert.equal(addCandidateRecord(pool, foreign, tracked, inventory), foreign);
+  assert.throws(
+    () => authoritativeCandidatePool([known], tracked, null, boundary),
+    /authoritative candidate inventory is required/
+  );
+  assert.throws(
+    () => authoritativeCandidatePool([known], tracked, inventory, null),
+    /authoritative candidate inventory boundary is required/
+  );
+  const { pool, addCandidate } = authoritativeCandidatePool(
+    [known],
+    tracked,
+    inventory,
+    boundary
+  );
+  assert.equal(addCandidate(newTony), null);
+  assert.equal(addCandidate(newBot), null);
+  assert.equal(addCandidate(foreign), foreign);
+  assert.equal(addCandidate(newForeign), null);
   assert.deepEqual([...pool.keys()], [known.key, foreign.key]);
 });
 

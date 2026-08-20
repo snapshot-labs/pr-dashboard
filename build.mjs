@@ -406,15 +406,45 @@ export function redactPrivate(rec) {
   return rec;
 }
 
-export function addCandidateRecord(pool, rec, tracked, authoritativeInventory = null) {
+export function addCandidateRecord(
+  pool,
+  rec,
+  tracked,
+  authoritativeInventory = null,
+  inventoryBoundary = null
+) {
   if (authoritativeInventory && tracked(rec.author) && !authoritativeInventory.has(rec.key))
     return null;
+  if (
+    authoritativeInventory &&
+    Number.isFinite(inventoryBoundary) &&
+    !tracked(rec.author)
+  ) {
+    const createdAt = Date.parse(rec.createdAt || '');
+    if (!Number.isFinite(createdAt) || createdAt >= inventoryBoundary) return null;
+  }
   if (rec.private && !rec.publicPrivate) {
     if (tracked(rec.author)) return null;
     redactPrivate(rec);
   }
   if (!pool.has(rec.key)) pool.set(rec.key, rec);
   return pool.get(rec.key);
+}
+
+export function authoritativeCandidatePool(
+  seed,
+  tracked,
+  authoritativeInventory,
+  inventoryBoundary
+) {
+  if (!authoritativeInventory) throw new Error('authoritative candidate inventory is required');
+  if (!Number.isFinite(inventoryBoundary))
+    throw new Error('authoritative candidate inventory boundary is required');
+  const pool = new Map();
+  const addCandidate = rec =>
+    addCandidateRecord(pool, rec, tracked, authoritativeInventory, inventoryBoundary);
+  for (const rec of seed) addCandidate(rec);
+  return { pool, addCandidate };
 }
 
 export async function resolveDeps(pr, repoMeta, listOpenPrs = openPrsInRepo) {
@@ -610,6 +640,7 @@ export function assertExpectedFingerprint(kind, actual, expected) {
 }
 
 async function main() {
+  const inventoryBoundary = Math.floor(Date.now() / 1000) * 1000;
   const reviewInventory = await getReviewInventory(TRACKED_AUTHORS, ORG);
   const authorReviewInventory = reviewInventory.filter(
     pr => String(pr.author || '').toLowerCase() === AUTHOR.toLowerCase()
@@ -701,9 +732,12 @@ async function main() {
   // more; a candidate becomes a node only when a dependency edge joins it,
   // transitively and in either direction, to a PR of mine. Bodies come with the
   // list endpoint, so asking every candidate for its edges is nearly free.
-  const pool = new Map();
-  const addCandidate = rec => addCandidateRecord(pool, rec, isTracked, inventoryByKey);
-  for (const p of seed) addCandidate(p);
+  const { pool, addCandidate } = authoritativeCandidatePool(
+    seed,
+    isTracked,
+    inventoryByKey,
+    inventoryBoundary
+  );
 
   const scanned = new Set();
   const scanRepo = async name => {
