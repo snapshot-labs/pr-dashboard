@@ -1395,6 +1395,23 @@ await t('main candidate admission keeps neutral Tony private seeds and withholds
   assert.equal(addCandidateRecord(pool, bot, tracked), null);
   assert.equal(pool.has(bot.key), false);
 });
+await t('authoritative A-to-A admission ignores tracked PRs first seen in the later REST sweep', () => {
+  const repo = 'snapshot-labs/stamp';
+  const tracked = isMineFor(['tony8713', 'chai3-bot']);
+  const inventoryKey = `${repo}#1`;
+  const inventory = new Map([[inventoryKey, { key: inventoryKey }]]);
+  const pool = new Map();
+  const known = { key: inventoryKey, repo, number: 1, author: 'tony8713', private: false };
+  const newTony = { key: `${repo}#2`, repo, number: 2, author: 'tony8713', private: false };
+  const newBot = { key: `${repo}#3`, repo, number: 3, author: 'chai3-bot', private: false };
+  const foreign = { key: `${repo}#4`, repo, number: 4, author: 'wa0x6e', private: false };
+
+  assert.equal(addCandidateRecord(pool, known, tracked, inventory), known);
+  assert.equal(addCandidateRecord(pool, newTony, tracked, inventory), null);
+  assert.equal(addCandidateRecord(pool, newBot, tracked, inventory), null);
+  assert.equal(addCandidateRecord(pool, foreign, tracked, inventory), foreign);
+  assert.deepEqual([...pool.keys()], [known.key, foreign.key]);
+});
 
 console.log('withheld accounting');
 const wh = (repo, number, author) => ({ repo, number, author, private: true });

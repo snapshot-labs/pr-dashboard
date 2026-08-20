@@ -406,7 +406,9 @@ export function redactPrivate(rec) {
   return rec;
 }
 
-export function addCandidateRecord(pool, rec, tracked) {
+export function addCandidateRecord(pool, rec, tracked, authoritativeInventory = null) {
+  if (authoritativeInventory && tracked(rec.author) && !authoritativeInventory.has(rec.key))
+    return null;
   if (rec.private && !rec.publicPrivate) {
     if (tracked(rec.author)) return null;
     redactPrivate(rec);
@@ -700,7 +702,7 @@ async function main() {
   // transitively and in either direction, to a PR of mine. Bodies come with the
   // list endpoint, so asking every candidate for its edges is nearly free.
   const pool = new Map();
-  const addCandidate = rec => addCandidateRecord(pool, rec, isTracked);
+  const addCandidate = rec => addCandidateRecord(pool, rec, isTracked, inventoryByKey);
   for (const p of seed) addCandidate(p);
 
   const scanned = new Set();
