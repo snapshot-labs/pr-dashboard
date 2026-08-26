@@ -295,6 +295,7 @@ ${fillLegend}
       : ''
   }
 <span><span class="k">◇ @handle</span> whose PR it is, when it is not ${esc(author)}'s to merge</span>
+<span><span class="k appr">✓ approved @handle</span> a human other than ${esc(author)} approved it, drawn as a thicker border</span>
 <span><span class="k crit">⊘</span> the PR's own title says do not merge</span>
 <span><span class="k crit">⊗</span> waits on a PR that was closed without merging</span>
 <span><span class="k gate">GATED</span> release-gated: a published release, not just a merge</span>
