@@ -28,14 +28,29 @@
 // WHAT A CARD SAYS. A card is the PR's ref and the PR's TITLE, because a bare
 // number is not a thing anyone recognises. Everything that was a status label --
 // CI wording, rank, "no prerequisites" -- is off the card: it made the card wide
-// and told the reader nothing about what merges before what. Three markers
+// and told the reader nothing about what merges before what. Five markers
 // survive, because each of them changes when or whether an edge clears, and each
 // has a legend entry under the drawing:
 //
 //   ◇ @handle   this PR is not the dashboard author's, so it is not theirs to merge
 //   ⊘ ...       the PR's OWN TITLE says do not merge (lifted out of the title so
 //               that truncating the title can never hide it)
+//   ⊗ blocked   waits on a prerequisite that was closed without merging
+//   ✓ approved  a human teammate has approved it -- see src/reviews.mjs for what
+//               counts as one, and the thicker border below
 //   GATED       on an EDGE: satisfied by a published release, not by a merge
+//
+// WHAT A CARD'S BORDER WEIGHT MEANS: approved by a human. A thicker outline is
+// the second channel for the ✓ marker above, and it is deliberately a channel
+// the fill does not use, so "what state is it" and "has anybody signed it off"
+// never compete for the same ink. A stroke width is not readable on its own --
+// nobody measures a border -- which is exactly why the marker line and the
+// legend entry are not optional extras to it.
+//
+// It also has to coexist with the DASHED outline that says "not mine": a PR can
+// be somebody else's AND approved, so the two facts are drawn as weight and as
+// dash pattern rather than both as one stroke, and an approved foreign card is a
+// thick dashed box with both markers on it.
 //
 // WHAT A CARD IS FILLED WITH: the STATE of that pull request -- open, draft,
 // merged, or closed for a prerequisite that was abandoned. Colour on this canvas
@@ -61,6 +76,7 @@
 // carries a <title> of its own.
 
 import { CI_LABEL } from './ci.mjs';
+import { APPROVED_GLYPH, approvedLabel, approvedText } from './reviews.mjs';
 import { PR_STATES, STATE_CLASS, STATE_GLYPH, STATE_LABEL, STATE_WORD } from './state.mjs';
 
 export const esc = s =>
@@ -85,6 +101,14 @@ export const ROW_GAP = 12; // between two cards stacked in one column
 export const RANK_GAP = 96; // between rank columns: where the arrows live
 export const LANE_H = 48; // header lane above every column, carrying its label
 const PAD = 10;
+
+// The card outline, and the one case that thickens it: a human has approved the
+// PR. Emitted as a presentation attribute rather than a CSS rule, like the rest
+// of the geometry, so the border weight survives the stylesheet being stripped.
+// 1 to 2.5 is a difference that reads at a glance next to an ordinary card; it
+// is still never the only thing saying so (see nodeMarks()).
+export const BOX_STROKE = 1;
+export const BOX_STROKE_APPROVED = 2.5;
 
 // Inside a card.
 const CARD_PAD_X = 10;
@@ -270,9 +294,23 @@ export function nodeState(n) {
   };
 }
 
+// Who has approved this PR, as the build attached it (build.mjs
+// attachApprovals): the humans whose latest review is an approval, page author
+// and bots already filtered out.
+//
+// A WITHHELD CARD NAMES NOBODY, REVIEWER INCLUDED. A card out of a private repo
+// has already lost its title, its author and its repo name; a reviewer handle is
+// the same kind of fact about work this page is not showing, so it is dropped
+// here as well rather than trusted not to have been fetched. The build does not
+// fetch reviews for a hidden node either -- this is the second lock on the same
+// door, because the border is drawn from this function.
+export const nodeApprovers = n =>
+  !n || n.hidden || !Array.isArray(n.approvedBy) ? [] : n.approvedBy.filter(Boolean);
+export const nodeApproved = n => nodeApprovers(n).length > 0;
+
 // The markers a card is allowed to carry. Everything else that used to be a
-// badge is gone; these three stay because each one changes whether or when
-// something can merge, and each is explained in the legend under the drawing.
+// badge is gone; these stay because each one changes whether or when something
+// can merge, and each is explained in the legend under the drawing.
 //
 // "draft" is not among them: it is the card's FILL now, which costs no line.
 //
@@ -293,6 +331,11 @@ export function nodeState(n) {
 // one in the reason it is blocked either.
 export const blockedRef = b => (b.hidden ? `#${b.number}` : shortRef(b.repo, b.number));
 
+// The approval marker goes LAST and the cap is three, not two, for one reason:
+// a card can be somebody else's and approved at the same time, and either fact
+// alone is a different picture from both together. Dropping the approval to keep
+// the card two lines shorter would silently unmark the exact case the border
+// weight exists for.
 export function nodeMarks(n, hold) {
   const out = [];
   if (hold) out.push({ role: 'critical', glyph: '⊘', text: hold });
@@ -308,6 +351,10 @@ export function nodeMarks(n, hold) {
   else if (n.kind !== 'own') {
     if (!n.author) out.push({ role: 'foreign', glyph: '?', text: 'author unknown' });
     else if (n.foreign) out.push({ role: 'foreign', glyph: '◇', text: `@${n.author}` });
+  }
+  const approvers = nodeApprovers(n);
+  if (approvers.length) {
+    out.push({ role: 'approved', glyph: APPROVED_GLYPH, text: approvedText(approvers) });
   }
   return out.slice(0, 3);
 }
@@ -342,6 +389,10 @@ export function cardOf(n) {
     title: shown,
     fullTitle: n.title || null,
     hold,
+    // The border weight, decided once here so the rect and the <g> class cannot
+    // disagree about it.
+    approved: nodeApproved(n),
+    approvedBy: nodeApprovers(n),
     dim: !known,
     lines: lines.length ? lines : [shown],
     marks,
@@ -378,6 +429,10 @@ export function nodeTitleText(n) {
         ? 'already merged — drawn because something here still depends on it, and nothing is waiting on it any more'
         : 'already merged, but release-gated: the merge landed and the gate has not opened, so it is still in the way'
     );
+  // The border weight, spelled out. Same argument as the state: a reader who
+  // cannot see the outline gets the fact here, with the handles the card face
+  // may have had to abbreviate.
+  if (nodeApproved(n)) bits.push(approvedLabel(nodeApprovers(n)));
   if (n.status) bits.push(n.status);
   if (n.blockedBy && n.blockedBy.length) {
     bits.push(
@@ -681,6 +736,10 @@ export const descRef = n => {
   // never sees the fill still learns that a prerequisite has already landed.
   const state = nodeState(n).state;
   if (state !== 'open') notes.push(nodeState(n).word);
+  // And who approved it, for the same reason again: the thicker border is the
+  // one channel that is pure geometry, so it has to be a sentence here or a
+  // reader not looking at the picture never learns the PR was signed off.
+  if (nodeApproved(n)) notes.push(approvedLabel(nodeApprovers(n)));
   return notes.length ? `${nodeRef(n)} (${notes.join('; ')})` : nodeRef(n);
 };
 
@@ -730,6 +789,17 @@ export function graphDesc(graph) {
       ' the usual case and is left unmarked below; anything else is named in brackets after the' +
       ' reference. The only merged pull requests drawn are prerequisites that have already' +
       ' landed.',
+    // The border weight, which is the one channel that is nothing but geometry.
+    // A stroke width cannot be described to a reader who is not looking at the
+    // drawing, so it is stated here as a fact about the pull request instead, and
+    // every approved card is named as such where it is listed.
+    'A card is drawn with a thicker border when a human other than the page author has approved' +
+      ' that pull request, and every one of those cards also prints a tick and the approving' +
+      ' handles, so the border weight is never the only thing saying it. An approval is counted' +
+      ' from each reviewer\'s latest review only, so a reviewer who approved and later requested' +
+      ' changes is not an approval; a review by a bot is not one either, and neither is the page' +
+      ' author\'s own. Where an approved pull request is listed below, its approvers are named in' +
+      ' brackets after the reference.',
     'The whole structure follows, in words.'
   ];
   // Said before the column list, like the merged set is, because a reader who is
@@ -950,8 +1020,12 @@ export function graphSvg(graph, ids = {}) {
     const c = n.card || cardOf(n);
     const rows = c.lines.length || 1;
     const inner = [
+      // The border weight is the approval channel, and it is a presentation
+      // attribute for the same reason the rest of the geometry is: with the
+      // stylesheet stripped an approved card still draws thicker.
       `<rect class="box" x="${n.x}" y="${n.y}" width="${NODE_W}" height="${c.height}" rx="6"` +
-        ` fill="none" stroke="currentColor"/>`,
+        ` fill="none" stroke="currentColor"` +
+        ` stroke-width="${c.approved ? BOX_STROKE_APPROVED : BOX_STROKE}"/>`,
       `<text class="ref" x="${n.x + CARD_PAD_X + c.avRoom}" y="${n.y + REF_Y}"` +
         ` font-size="${REF_SIZE}">${esc(c.ref)}</text>`,
       // The fill, said in a glyph and a word, pinned to the right edge of the
@@ -1011,7 +1085,7 @@ export function graphSvg(graph, ids = {}) {
       : `<a href="${esc(n.url)}" target="_blank" rel="noopener">${inner.join('')}</a>`;
     out.push(
       `<g class="node ${n.kind === 'bot' ? 'bot' : n.kind === 'own' ? 'own' : 'dep'} ` +
-        `${c.state.cls}">` +
+        `${c.state.cls}${c.approved ? ' approved' : ''}">` +
         `<title>${esc(nodeTitleText(n))}</title>${body}</g>`
     );
   }
@@ -1063,6 +1137,12 @@ svg.depgraph .node.bot .box{stroke-dasharray:1 3}
    off, or a browser that cannot draw it, loses no fact. The ring doubles as the
    placeholder: an avatar that fails to draw leaves a disc, not a hole. */
 svg.depgraph .avring{stroke:var(--rule)}
+/* APPROVED BY A HUMAN = a thicker border. The width itself is a presentation
+   attribute on the rect (see graphSvg), so this rule only has to keep the DASH
+   readable at the heavier weight: 4-on-3 at 2.5px starts to read as a solid
+   line, which would take the "not mine" channel away from a card that is both.
+   An approved foreign card is a thick DASHED box, and it carries both markers. */
+svg.depgraph .node.dep.approved .box{stroke-dasharray:6 4}
 svg.depgraph a{text-decoration:none}
 /* the card: the ref identifies it, the TITLE is what it is */
 svg.depgraph .ref{font:600 10.5px ui-monospace,SFMono-Regular,Menlo,monospace;fill:var(--ink2)}
@@ -1072,6 +1152,9 @@ svg.depgraph .mark{font:9.5px ui-sans-serif,system-ui,sans-serif;fill:var(--ink2
 svg.depgraph .mark .g{font-family:ui-monospace,monospace}
 svg.depgraph .mark.m-critical{fill:var(--critical-ink);font-weight:700}
 svg.depgraph .mark.m-foreign{fill:var(--ink2);font-weight:600}
+/* The words that carry the thicker border. Not decoration: a stroke width is
+   not something a reader can measure, so this line is what the border means. */
+svg.depgraph .mark.m-approved{fill:var(--good-ink);font-weight:600}
 svg.depgraph .edge{stroke:var(--ink2)}
 svg.depgraph .edge.cross{stroke-dasharray:5 4}
 /* An arrow whose tail has already landed. Lighter, and labelled -- the label is
@@ -1102,6 +1185,7 @@ svg.depgraph .elabel.met{fill:var(--good-ink)}
 .legend .k.crit{color:var(--critical-ink);font-weight:700}
 .legend .k.gate{color:var(--serious-ink);font-weight:700;letter-spacing:.06em}
 .legend .k.met{color:var(--good-ink);font-weight:700;letter-spacing:.06em}
+.legend .k.appr{color:var(--good-ink);font-weight:700}
 /* The card-fill key. The swatch shows the fill AND the glyph that goes with it,
    so the entry still reads as three different things in greyscale. Not scoped to
    the legend: the banner uses the same swatch, and one rule keeps them equal. */

@@ -4,6 +4,7 @@ import { parseDeclarations } from './src/declarations.mjs';
 import { classify } from './src/ci.mjs';
 import {
   accountWithheld,
+  attachApprovals,
   buildGraph,
   collectAvatars,
   componentsOf,
@@ -23,6 +24,8 @@ import {
 } from './build.mjs';
 import {
   AVATAR_PX,
+  BOX_STROKE,
+  BOX_STROKE_APPROVED,
   cardOf,
   columnLabel,
   descRef,
@@ -30,6 +33,8 @@ import {
   layoutGraph,
   NODE_H,
   NODE_W,
+  nodeApproved,
+  nodeApprovers,
   nodeState,
   nodeTitleText,
   rankCensus,
@@ -41,6 +46,13 @@ import {
 } from './src/graph.mjs';
 import { render } from './src/render.mjs';
 import { getAvatar, getPr } from './src/github.mjs';
+import {
+  approvedLabel,
+  approvedText,
+  humanApprovers,
+  isBotReviewer,
+  latestReviewByReviewer
+} from './src/reviews.mjs';
 import { openPrState, PR_STATES, prState, STATE_GLYPH } from './src/state.mjs';
 
 let pass = 0;
@@ -2349,6 +2361,168 @@ await t('getAvatar refuses SVG and oversized images, and inlines a PNG', async (
   } finally {
     globalThis.fetch = real;
   }
+});
+
+console.log('human approval: a bot review or the page author\'s own never counts');
+const review = (login, state, at, over = {}) => ({
+  state,
+  user: { login, type: 'User', ...over },
+  submitted_at: at
+});
+
+await t('no user on a review is not a human approval', () => {
+  assert.equal(isBotReviewer(null), true);
+});
+await t('a GitHub App review is a bot by type, regardless of login', () => {
+  assert.equal(isBotReviewer({ login: 'dependabot', type: 'Bot' }), true);
+});
+await t('a [bot] login suffix is a bot even when the type is missing', () => {
+  assert.equal(isBotReviewer({ login: 'copilot-pull-request-reviewer[bot]' }), true);
+});
+await t('chai3-bot is a bot by name only, matched case-insensitively', () => {
+  assert.equal(isBotReviewer({ login: 'Chai3-Bot', type: 'User' }), true);
+});
+await t('an ordinary teammate is not a bot', () => {
+  assert.equal(isBotReviewer({ login: 'wa0x6e', type: 'User' }), false);
+});
+
+await t('COMMENTED and PENDING leave no deciding review behind', () => {
+  const reviews = [
+    review('wa0x6e', 'COMMENTED', '2026-01-01T00:00:00Z'),
+    review('wa0x6e', 'PENDING', '2026-01-02T00:00:00Z')
+  ];
+  assert.equal(latestReviewByReviewer(reviews).size, 0);
+});
+await t('a later CHANGES_REQUESTED overrides an earlier APPROVED', () => {
+  const reviews = [
+    review('wa0x6e', 'APPROVED', '2026-01-01T00:00:00Z'),
+    review('wa0x6e', 'CHANGES_REQUESTED', '2026-01-05T00:00:00Z')
+  ];
+  assert.equal(latestReviewByReviewer(reviews).get('wa0x6e').state, 'CHANGES_REQUESTED');
+});
+await t('a COMMENTED review after an approval does not retract it', () => {
+  const reviews = [
+    review('wa0x6e', 'APPROVED', '2026-01-01T00:00:00Z'),
+    review('wa0x6e', 'COMMENTED', '2026-01-05T00:00:00Z')
+  ];
+  assert.equal(latestReviewByReviewer(reviews).get('wa0x6e').state, 'APPROVED');
+});
+await t('two reviews in the same second break the tie by array order', () => {
+  const reviews = [
+    review('wa0x6e', 'APPROVED', '2026-01-01T00:00:00Z'),
+    review('wa0x6e', 'CHANGES_REQUESTED', '2026-01-01T00:00:00Z')
+  ];
+  assert.equal(latestReviewByReviewer(reviews).get('wa0x6e').state, 'CHANGES_REQUESTED');
+});
+
+await t('a bot\'s APPROVED review never counts, even when it is the only review', () => {
+  const reviews = [review('chai3-bot', 'APPROVED', '2026-01-01T00:00:00Z')];
+  assert.deepEqual(humanApprovers(reviews), []);
+});
+await t('the page author approving is not counted, even on somebody else\'s PR', () => {
+  const reviews = [review('tony8713', 'APPROVED', '2026-01-01T00:00:00Z')];
+  assert.deepEqual(humanApprovers(reviews, isMineFor('tony8713')), []);
+});
+await t('a human teammate who is neither a bot nor the page author counts', () => {
+  const reviews = [review('wa0x6e', 'APPROVED', '2026-01-01T00:00:00Z')];
+  assert.deepEqual(humanApprovers(reviews, isMineFor('tony8713')), ['wa0x6e']);
+});
+await t('a dismissed approval does not count', () => {
+  const reviews = [review('wa0x6e', 'DISMISSED', '2026-01-01T00:00:00Z')];
+  assert.deepEqual(humanApprovers(reviews), []);
+});
+await t('an approval later withdrawn by requesting changes does not count', () => {
+  const reviews = [
+    review('wa0x6e', 'APPROVED', '2026-01-01T00:00:00Z'),
+    review('wa0x6e', 'CHANGES_REQUESTED', '2026-01-02T00:00:00Z')
+  ];
+  assert.deepEqual(humanApprovers(reviews), []);
+});
+await t('two approvers are ordered by when they approved, not alphabetically', () => {
+  const reviews = [
+    review('zed', 'APPROVED', '2026-01-02T00:00:00Z'),
+    review('amy', 'APPROVED', '2026-01-01T00:00:00Z')
+  ];
+  assert.deepEqual(humanApprovers(reviews), ['amy', 'zed']);
+});
+
+await t('approvedText names up to two handles', () => {
+  assert.equal(approvedText(['a', 'b']), 'approved @a, @b');
+});
+await t('approvedText counts the rest past two rather than dropping them', () => {
+  assert.equal(approvedText(['a', 'b', 'c', 'd']), 'approved @a, @b +2');
+});
+await t('approvedText and approvedLabel are both null with no approvers', () => {
+  assert.equal(approvedText([]), null);
+  assert.equal(approvedLabel([]), null);
+});
+await t('approvedLabel names every approver, untruncated', () => {
+  assert.equal(approvedLabel(['a', 'b', 'c', 'd']), 'approved by @a, @b, @c, @d');
+});
+
+console.log('attachApprovals: wiring build.mjs up to src/reviews.mjs');
+const rvNode = (over = {}) => ({ key: 'a#1', repo: S, number: 1, hidden: false, ...over });
+const stubReviews = map => async (repo, number) => map[`${repo}#${number}`] ?? [];
+
+await t('a human approver reaches the node as approvedBy', async () => {
+  const nodes = [rvNode()];
+  const fetch = stubReviews({ [`${S}#1`]: [review('wa0x6e', 'APPROVED', '2026-01-01T00:00:00Z')] });
+  const approved = await attachApprovals(nodes, fetch);
+  assert.deepEqual(nodes[0].approvedBy, ['wa0x6e']);
+  assert.equal(approved, 1);
+});
+await t('NEGATIVE: a hidden node is never fetched for and gets no approvedBy', async () => {
+  const asked = [];
+  const nodes = [rvNode({ key: 'x#9', number: 9, hidden: true })];
+  const fetch = async (repo, number) => {
+    asked.push(`${repo}#${number}`);
+    return [];
+  };
+  const approved = await attachApprovals(nodes, fetch);
+  assert.deepEqual(asked, [], 'the hidden node\'s reviews are not even requested');
+  assert.equal(nodes[0].approvedBy, undefined);
+  assert.equal(approved, 0);
+});
+await t('attachApprovals excludes the page author through the isSelf it is passed', async () => {
+  const nodes = [rvNode({ key: 'a#2', number: 2 })];
+  const fetch = stubReviews({ [`${S}#2`]: [review('tony8713', 'APPROVED', '2026-01-01T00:00:00Z')] });
+  const approved = await attachApprovals(nodes, fetch, isMineFor('tony8713'));
+  assert.deepEqual(nodes[0].approvedBy, []);
+  assert.equal(approved, 0);
+});
+await t('a bot review reaches attachApprovals and still does not count', async () => {
+  const nodes = [rvNode({ key: 'a#3', number: 3 })];
+  const fetch = stubReviews({ [`${S}#3`]: [review('chai3-bot', 'APPROVED', '2026-01-01T00:00:00Z')] });
+  const approved = await attachApprovals(nodes, fetch);
+  assert.deepEqual(nodes[0].approvedBy, []);
+  assert.equal(approved, 0);
+});
+
+console.log('the approval marker and the thicker border reach the card');
+await t('an approved card gets the thicker stroke and the tick marker', () => {
+  const g = buildGraph([sp(491)], mine);
+  at(g, `${S}#491`).approvedBy = ['wa0x6e'];
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  assert.ok(html.includes(`stroke-width="${BOX_STROKE_APPROVED}"`));
+  assert.match(html, /<tspan class="g">✓<\/tspan> approved @wa0x6e/);
+  assert.match(html, /class="node own st-open approved"/);
+});
+await t('a card with nobody approving draws the ordinary thin stroke', () => {
+  const g = buildGraph([sp(491)], mine);
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  assert.ok(html.includes(`stroke-width="${BOX_STROKE}"`));
+  assert.doesNotMatch(
+    html,
+    /<tspan class="g">✓<\/tspan> approved @/,
+    'no approval marker with nobody approving'
+  );
+});
+await t('nodeApprovers names nobody on a withheld card, even with approvedBy set', () => {
+  const n = { hidden: true, approvedBy: ['wa0x6e'] };
+  assert.deepEqual(nodeApprovers(n), []);
+  assert.equal(nodeApproved(n), false);
 });
 
 // --- ordering within a column --------------------------------------------
