@@ -108,7 +108,8 @@ Several markers survive, each with a legend entry under the drawing, because eac
 | dotted outline | on a card | a **tracked bot**'s open PR (`PR_BOT_AUTHORS`): scheduled here like `PR_AUTHOR`'s own, still marked `◇ @handle`, still outside the open-PR count |
 | `⊘ …` | on a card | the PR's **own title** says do not merge |
 | `⊗ blocked: …` | on a card | waits on a declared prerequisite that was **closed without merging**; that card is not drawn, see below |
-| `✓ approved @handle` | on a card | a human teammate, not `PR_AUTHOR` and not a bot, approved it; see [What a card's border weight means](#what-a-cards-border-weight-means) |
+| `✓ approved @handle` | on a card | a human teammate, not `PR_AUTHOR` and not a bot, approved it; see [What a card's border means](#what-a-cards-border-means) |
+| `✗ changes requested @handle` | on a card | same, but asked for changes; wins over `✓ approved` when a PR has both, see below |
 | `GATED` | on an **edge** | release-gated: a published release clears it, a merge does not |
 
 `✓ merged` is the one marker that displaces another: a merged card never lifts a stale `⊘` out of
@@ -181,8 +182,9 @@ declaration somebody wrote in a PR body is never silently swallowed just because
 
 ## What a card's colour means
 
-A card's fill is the **state of the pull request**, and it is the only thing on the page that colour
-is spent on.
+A card's fill is the **state of the pull request**, the only thing the fill encodes. (The border
+carries a second, independent colour, for review status — see
+[What a card's border means](#what-a-cards-border-means) below.)
 
 | fill | glyph | state |
 |---|---|---|
@@ -225,28 +227,36 @@ PR; whether a dependency is cleared is a property of an *edge*.
 
 Today's build: **19 open, 3 draft, 0 merged.**
 
-## What a card's border weight means
+## What a card's border means
 
 A card is drawn with a **thicker outline** (`stroke-width` 2.5 instead of 1) when a human teammate
-has approved that pull request, decided in `src/reviews.mjs` and attached to each node by
-`attachApprovals()` in `build.mjs` before the layout runs. It is a second, independent axis from the
-fill: the fill is what the PR *is*, the border weight is whether somebody has signed it off, and a
-card can be any state and approved, or any state and not. A stroke width is not something a reader
-can measure on its own, so it never carries the fact alone: every approved card also prints
-`✓ approved @handle` (or `+N` past two names) and the border weight is spelled out in full in the
+has taken a deciding position on that pull request, and the outline's **colour** says which way:
+green for approved, red for changes requested. Both are decided in `src/reviews.mjs` and attached to
+each node by `attachReviewStatus()` in `build.mjs` before the layout runs. The border is a second,
+independent axis from the fill: the fill is what the PR *is*, the border is whether and how somebody
+has weighed in, and a card can be any state, reviewed or not. A stroke's width and colour are not
+something a reader can measure or name on their own, so neither
+ever carries the fact alone: every reviewed card also prints `✓ approved @handle` or
+`✗ changes requested @handle` (or `+N` past two names) and the border is spelled out in full in the
 card's hover title and in the SVG's `<desc>`.
 
-**What counts as approved.** Only each reviewer's *latest* deciding review: GitHub's reviews
+**What counts, for either verdict.** Only each reviewer's *latest* deciding review: GitHub's reviews
 endpoint is an append-only log, so a reviewer who approved and later requested changes reads as
 `CHANGES_REQUESTED`, not approved, and a review that was dismissed reads as `DISMISSED` regardless of
 what it originally said. `COMMENTED` and `PENDING` are not verdicts and never retract a standing
-approval. A bot's review never counts, whether by `user.type`, by a `[bot]` login suffix, or by name
-for `chai3-bot` (automation under an ordinary user account), and neither does `PR_AUTHOR`'s own,
-through the same "is this mine" predicate the rest of the build uses.
+approval or a standing request for changes. A bot's review never counts, whether by `user.type`, by a
+`[bot]` login suffix, or by name for `chai3-bot` (automation under an ordinary user account), and
+neither does `PR_AUTHOR`'s own, through the same "is this mine" predicate the rest of the build uses.
+
+**When a PR has both.** An approver and a separate reviewer asking for changes can land on the same
+PR at once. `reviewState()` in `src/reviews.mjs` picks one state for the whole card — border, marker,
+hover title and `<desc>` all read the same value — and changes requested wins, because it is the more
+urgent of the two and the one that actually blocks a merge. The approval is not lost from GitHub, only
+from this page's single-state summary of it.
 
 **A withheld card names nobody, reviewer included.** Reviews are not fetched for a hidden node at
-all, and `nodeApprovers()` blanks `approvedBy` on one regardless, the same two-lock pattern the
-avatar and title redaction use.
+all, and `nodeApprovers()` / `nodeChangesRequestedBy()` blank `approvedBy` / `changesRequestedBy` on
+one regardless, the same two-lock pattern the avatar and title redaction use.
 
 ## Accessibility, and what removing the list cost
 
@@ -510,7 +520,7 @@ Your own private PRs are the one thing not drawn at all: they are withheld and c
 - **`PR_DASHBOARD_TOKEN`** (repo secret) — a **read-only** PAT used to read PRs, checks, reviews and
   releases across the org. Fine-grained: *Pull requests: read*, *Contents: read*,
   *Metadata: read* on the `snapshot-labs` repos. Classic equivalent: `repo` + `read:org`. The
-  reviews `getReviews()` fetches for the approval marker are a pull-request sub-resource, so
+  reviews `getReviews()` fetches for the review markers are a pull-request sub-resource, so
   *Pull requests: read* already covers them; no separate scope or token.
   Required, because the Action's built-in `GITHUB_TOKEN` is scoped to **this** repo and cannot
   search the org — with it the page silently under-reports.

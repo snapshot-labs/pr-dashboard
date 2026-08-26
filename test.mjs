@@ -4,7 +4,7 @@ import { parseDeclarations } from './src/declarations.mjs';
 import { classify } from './src/ci.mjs';
 import {
   accountWithheld,
-  attachApprovals,
+  attachReviewStatus,
   buildGraph,
   collectAvatars,
   componentsOf,
@@ -25,7 +25,7 @@ import {
 import {
   AVATAR_PX,
   BOX_STROKE,
-  BOX_STROKE_APPROVED,
+  BOX_STROKE_REVIEWED,
   cardOf,
   columnLabel,
   descRef,
@@ -35,6 +35,9 @@ import {
   NODE_W,
   nodeApproved,
   nodeApprovers,
+  nodeChangesRequested,
+  nodeChangesRequestedBy,
+  nodeReviewState,
   nodeState,
   nodeTitleText,
   rankCensus,
@@ -49,9 +52,13 @@ import { getAvatar, getPr } from './src/github.mjs';
 import {
   approvedLabel,
   approvedText,
+  changesRequestedLabel,
+  changesRequestedText,
   humanApprovers,
+  humanChangesRequested,
   isBotReviewer,
-  latestReviewByReviewer
+  latestReviewByReviewer,
+  reviewState
 } from './src/reviews.mjs';
 import { openPrState, PR_STATES, prState, STATE_GLYPH } from './src/state.mjs';
 
@@ -1605,10 +1612,11 @@ await t('the page still reads with the stylesheet stripped', () => {
 await t('the prose competing with the drawing is a fraction of what it was', () => {
   // The measured form of the complaint. The page carried ~1750 visible words
   // above the drawing and around it; what is left is the heading, one caption,
-  // the key to the marks, and four summaries.
+  // the key to the marks (now a third legend entry, for changes requested), and
+  // four summaries.
   const html = page(buildGraph([sp(491, [edge(S, 504)]), sp(504)]));
   const words = visibleWords(html);
-  assert.ok(words < 200, `${words} visible words`);
+  assert.ok(words < 230, `${words} visible words`);
   assert.ok(words > 60, `${words} visible words -- the legend must not have been gutted either`);
 });
 
@@ -2460,69 +2468,221 @@ await t('approvedLabel names every approver, untruncated', () => {
   assert.equal(approvedLabel(['a', 'b', 'c', 'd']), 'approved by @a, @b, @c, @d');
 });
 
-console.log('attachApprovals: wiring build.mjs up to src/reviews.mjs');
+console.log('changes requested: the same filters and ordering as approval, mirrored');
+await t('a bot\'s CHANGES_REQUESTED review never counts, even when it is the only review', () => {
+  const reviews = [review('chai3-bot', 'CHANGES_REQUESTED', '2026-01-01T00:00:00Z')];
+  assert.deepEqual(humanChangesRequested(reviews), []);
+});
+await t('the page author requesting changes is not counted, even on somebody else\'s PR', () => {
+  const reviews = [review('tony8713', 'CHANGES_REQUESTED', '2026-01-01T00:00:00Z')];
+  assert.deepEqual(humanChangesRequested(reviews, isMineFor('tony8713')), []);
+});
+await t('a human teammate who is neither a bot nor the page author counts', () => {
+  const reviews = [review('wa0x6e', 'CHANGES_REQUESTED', '2026-01-01T00:00:00Z')];
+  assert.deepEqual(humanChangesRequested(reviews, isMineFor('tony8713')), ['wa0x6e']);
+});
+await t('a request for changes later withdrawn by approving does not count', () => {
+  const reviews = [
+    review('wa0x6e', 'CHANGES_REQUESTED', '2026-01-01T00:00:00Z'),
+    review('wa0x6e', 'APPROVED', '2026-01-02T00:00:00Z')
+  ];
+  assert.deepEqual(humanChangesRequested(reviews), []);
+});
+await t('a dismissed changes-requested review does not count', () => {
+  const reviews = [review('wa0x6e', 'DISMISSED', '2026-01-01T00:00:00Z')];
+  assert.deepEqual(humanChangesRequested(reviews), []);
+});
+await t('two changes-requesters are ordered by when they asked, not alphabetically', () => {
+  const reviews = [
+    review('zed', 'CHANGES_REQUESTED', '2026-01-02T00:00:00Z'),
+    review('amy', 'CHANGES_REQUESTED', '2026-01-01T00:00:00Z')
+  ];
+  assert.deepEqual(humanChangesRequested(reviews), ['amy', 'zed']);
+});
+await t('an approver and a separate changes-requester are each counted by their own function', () => {
+  const reviews = [
+    review('amy', 'APPROVED', '2026-01-01T00:00:00Z'),
+    review('zed', 'CHANGES_REQUESTED', '2026-01-02T00:00:00Z')
+  ];
+  assert.deepEqual(humanApprovers(reviews), ['amy']);
+  assert.deepEqual(humanChangesRequested(reviews), ['zed']);
+});
+
+await t('changesRequestedText names up to two handles', () => {
+  assert.equal(changesRequestedText(['a', 'b']), 'changes requested @a, @b');
+});
+await t('changesRequestedText counts the rest past two rather than dropping them', () => {
+  assert.equal(changesRequestedText(['a', 'b', 'c', 'd']), 'changes requested @a, @b +2');
+});
+await t('changesRequestedText and changesRequestedLabel are both null with nobody requesting changes', () => {
+  assert.equal(changesRequestedText([]), null);
+  assert.equal(changesRequestedLabel([]), null);
+});
+await t('changesRequestedLabel names everyone who asked, untruncated', () => {
+  assert.equal(changesRequestedLabel(['a', 'b', 'c', 'd']), 'changes requested by @a, @b, @c, @d');
+});
+
+console.log('reviewState: the card\'s one review state, changes-requested winning ties');
+await t('nobody reviewed is waiting', () => {
+  assert.equal(reviewState([], []), 'waiting');
+});
+await t('an approver with nobody requesting changes is approved', () => {
+  assert.equal(reviewState(['wa0x6e'], []), 'approved');
+});
+await t('a changes-requester with nobody approving is changesRequested', () => {
+  assert.equal(reviewState([], ['wa0x6e']), 'changesRequested');
+});
+await t('NEGATIVE: both an approver and a changes-requester is changesRequested, not approved', () => {
+  assert.equal(reviewState(['amy'], ['zed']), 'changesRequested');
+});
+
+console.log('attachReviewStatus: wiring build.mjs up to src/reviews.mjs');
 const rvNode = (over = {}) => ({ key: 'a#1', repo: S, number: 1, hidden: false, ...over });
 const stubReviews = map => async (repo, number) => map[`${repo}#${number}`] ?? [];
 
 await t('a human approver reaches the node as approvedBy', async () => {
   const nodes = [rvNode()];
   const fetch = stubReviews({ [`${S}#1`]: [review('wa0x6e', 'APPROVED', '2026-01-01T00:00:00Z')] });
-  const approved = await attachApprovals(nodes, fetch);
+  const counts = await attachReviewStatus(nodes, fetch);
   assert.deepEqual(nodes[0].approvedBy, ['wa0x6e']);
-  assert.equal(approved, 1);
+  assert.deepEqual(nodes[0].changesRequestedBy, []);
+  assert.deepEqual(counts, { approved: 1, changesRequested: 0 });
 });
-await t('NEGATIVE: a hidden node is never fetched for and gets no approvedBy', async () => {
+await t('a human changes-requester reaches the node as changesRequestedBy', async () => {
+  const nodes = [rvNode({ key: 'a#4', number: 4 })];
+  const fetch = stubReviews({
+    [`${S}#4`]: [review('wa0x6e', 'CHANGES_REQUESTED', '2026-01-01T00:00:00Z')]
+  });
+  const counts = await attachReviewStatus(nodes, fetch);
+  assert.deepEqual(nodes[0].approvedBy, []);
+  assert.deepEqual(nodes[0].changesRequestedBy, ['wa0x6e']);
+  assert.deepEqual(counts, { approved: 0, changesRequested: 1 });
+});
+await t('an approver and a separate changes-requester on the same PR both reach the node', async () => {
+  const nodes = [rvNode({ key: 'a#5', number: 5 })];
+  const fetch = stubReviews({
+    [`${S}#5`]: [
+      review('amy', 'APPROVED', '2026-01-01T00:00:00Z'),
+      review('zed', 'CHANGES_REQUESTED', '2026-01-02T00:00:00Z')
+    ]
+  });
+  const counts = await attachReviewStatus(nodes, fetch);
+  assert.deepEqual(nodes[0].approvedBy, ['amy']);
+  assert.deepEqual(nodes[0].changesRequestedBy, ['zed']);
+  assert.deepEqual(counts, { approved: 1, changesRequested: 1 });
+});
+await t('NEGATIVE: a hidden node is never fetched for and gets neither list', async () => {
   const asked = [];
   const nodes = [rvNode({ key: 'x#9', number: 9, hidden: true })];
   const fetch = async (repo, number) => {
     asked.push(`${repo}#${number}`);
     return [];
   };
-  const approved = await attachApprovals(nodes, fetch);
+  const counts = await attachReviewStatus(nodes, fetch);
   assert.deepEqual(asked, [], 'the hidden node\'s reviews are not even requested');
   assert.equal(nodes[0].approvedBy, undefined);
-  assert.equal(approved, 0);
+  assert.equal(nodes[0].changesRequestedBy, undefined);
+  assert.deepEqual(counts, { approved: 0, changesRequested: 0 });
 });
-await t('attachApprovals excludes the page author through the isSelf it is passed', async () => {
+await t('attachReviewStatus excludes the page author through the isSelf it is passed', async () => {
   const nodes = [rvNode({ key: 'a#2', number: 2 })];
   const fetch = stubReviews({ [`${S}#2`]: [review('tony8713', 'APPROVED', '2026-01-01T00:00:00Z')] });
-  const approved = await attachApprovals(nodes, fetch, isMineFor('tony8713'));
+  const counts = await attachReviewStatus(nodes, fetch, isMineFor('tony8713'));
   assert.deepEqual(nodes[0].approvedBy, []);
-  assert.equal(approved, 0);
+  assert.deepEqual(counts, { approved: 0, changesRequested: 0 });
 });
-await t('a bot review reaches attachApprovals and still does not count', async () => {
+await t('a bot review reaches attachReviewStatus and still does not count, either state', async () => {
   const nodes = [rvNode({ key: 'a#3', number: 3 })];
-  const fetch = stubReviews({ [`${S}#3`]: [review('chai3-bot', 'APPROVED', '2026-01-01T00:00:00Z')] });
-  const approved = await attachApprovals(nodes, fetch);
-  assert.deepEqual(nodes[0].approvedBy, []);
-  assert.equal(approved, 0);
+  const fetch = stubReviews({
+    [`${S}#3`]: [review('chai3-bot', 'CHANGES_REQUESTED', '2026-01-01T00:00:00Z')]
+  });
+  const counts = await attachReviewStatus(nodes, fetch);
+  assert.deepEqual(nodes[0].changesRequestedBy, []);
+  assert.deepEqual(counts, { approved: 0, changesRequested: 0 });
 });
 
-console.log('the approval marker and the thicker border reach the card');
-await t('an approved card gets the thicker stroke and the tick marker', () => {
+console.log('the review marker and the border reach the card');
+await t('an approved card gets the thicker stroke, the tick marker, and the green class', () => {
   const g = buildGraph([sp(491)], mine);
   at(g, `${S}#491`).approvedBy = ['wa0x6e'];
   g.layout = layoutGraph(g);
   const html = page(g);
-  assert.ok(html.includes(`stroke-width="${BOX_STROKE_APPROVED}"`));
+  assert.ok(html.includes(`stroke-width="${BOX_STROKE_REVIEWED}"`));
   assert.match(html, /<tspan class="g">✓<\/tspan> approved @wa0x6e/);
   assert.match(html, /class="node own st-open approved"/);
+  assert.ok(html.includes('svg.depgraph .node.approved .box{stroke:var(--good-ink)}'));
 });
-await t('a card with nobody approving draws the ordinary thin stroke', () => {
+await t('a changes-requested card gets the thicker stroke, the cross marker, and the red class', () => {
+  const g = buildGraph([sp(491)], mine);
+  at(g, `${S}#491`).changesRequestedBy = ['wa0x6e'];
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  assert.ok(html.includes(`stroke-width="${BOX_STROKE_REVIEWED}"`));
+  assert.match(html, /<tspan class="g">✗<\/tspan> changes requested @wa0x6e/);
+  assert.match(html, /class="node own st-open changesRequested"/);
+  assert.ok(html.includes('svg.depgraph .node.changesRequested .box{stroke:var(--critical-ink)}'));
+});
+await t('NEGATIVE: both an approver and a changes-requester draws changesRequested, not approved', () => {
+  const g = buildGraph([sp(491)], mine);
+  const n = at(g, `${S}#491`);
+  n.approvedBy = ['amy'];
+  n.changesRequestedBy = ['zed'];
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  assert.match(html, /class="node own st-open changesRequested"/);
+  assert.match(html, /<tspan class="g">✗<\/tspan> changes requested @zed/);
+  assert.doesNotMatch(html, /approved @amy/, 'the approver is not the card\'s state once changes are requested');
+});
+await t('NEGATIVE: the hover title and the accessible text pick the same winner as the card face', () => {
+  const g = buildGraph([sp(491)], mine);
+  const n = at(g, `${S}#491`);
+  n.approvedBy = ['amy'];
+  n.changesRequestedBy = ['zed'];
+  g.layout = layoutGraph(g);
+  assert.match(nodeTitleText(n), /changes requested by @zed/);
+  assert.doesNotMatch(nodeTitleText(n), /approved by @amy/, 'the hover title agrees with the card face');
+  assert.match(descRef(n), /changes requested by @zed/);
+  assert.doesNotMatch(descRef(n), /approved by @amy/, 'the accessible text agrees with the card face too');
+});
+await t('a card with nobody reviewing draws the ordinary thin, unmarked stroke', () => {
   const g = buildGraph([sp(491)], mine);
   g.layout = layoutGraph(g);
   const html = page(g);
   assert.ok(html.includes(`stroke-width="${BOX_STROKE}"`));
   assert.doesNotMatch(
     html,
-    /<tspan class="g">✓<\/tspan> approved @/,
-    'no approval marker with nobody approving'
+    /<tspan class="g">✓<\/tspan> approved @|<tspan class="g">✗<\/tspan> changes requested @/,
+    'no review marker with nobody having reviewed'
   );
+  assert.match(html, /class="node own st-open"/);
 });
-await t('nodeApprovers names nobody on a withheld card, even with approvedBy set', () => {
-  const n = { hidden: true, approvedBy: ['wa0x6e'] };
+await t('nodeApprovers and nodeChangesRequestedBy name nobody on a withheld card, even with both set', () => {
+  const n = { hidden: true, approvedBy: ['wa0x6e'], changesRequestedBy: ['zed'] };
   assert.deepEqual(nodeApprovers(n), []);
   assert.equal(nodeApproved(n), false);
+  assert.deepEqual(nodeChangesRequestedBy(n), []);
+  assert.equal(nodeChangesRequested(n), false);
+  assert.equal(nodeReviewState(n), 'waiting');
+});
+await t('nodeReviewState reads both lists off the node and applies the same precedence', () => {
+  assert.equal(nodeReviewState({ approvedBy: ['amy'], changesRequestedBy: [] }), 'approved');
+  assert.equal(nodeReviewState({ approvedBy: [], changesRequestedBy: ['zed'] }), 'changesRequested');
+  assert.equal(nodeReviewState({ approvedBy: ['amy'], changesRequestedBy: ['zed'] }), 'changesRequested');
+});
+await t('the legend keys the changes-requested marker as well as the approved one', () => {
+  const g = buildGraph([sp(491)], mine);
+  g.layout = layoutGraph(g);
+  const html = page(g);
+  assert.match(html, /<span class="k appr">✓ approved @handle<\/span>/);
+  assert.match(html, /<span class="k chreq">✗ changes requested @handle<\/span>/);
+});
+await t('graphDesc names a changes-requested pull request in words, not only on the canvas', () => {
+  const g = buildGraph([sp(491)], mine);
+  at(g, `${S}#491`).changesRequestedBy = ['wa0x6e'];
+  layoutGraph(g);
+  const desc = graphDesc(g);
+  assert.match(desc, /changes requested/);
+  assert.match(desc, /changes requested by @wa0x6e/);
 });
 
 // --- ordering within a column --------------------------------------------
