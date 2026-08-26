@@ -107,8 +107,8 @@ Several markers survive, each with a legend entry under the drawing, because eac
 | dashed outline | on a card | not one of `PR_AUTHOR`'s open PRs: somebody else's, or a prerequisite of theirs that has already merged |
 | dotted outline | on a card | a **tracked bot**'s open PR (`PR_BOT_AUTHORS`): scheduled here like `PR_AUTHOR`'s own, still marked `◇ @handle`, still outside the open-PR count |
 | `⊘ …` | on a card | the PR's **own title** says do not merge |
-| `⊗ blocked: …` | on a card | waits on a declared prerequisite that was **closed without merging** — that card is not drawn, see below |
-| `✓ approved @handle` | on a card | a human teammate, not `PR_AUTHOR` and not a bot, approved it — see [What a card's border weight means](#what-a-cards-border-weight-means) |
+| `⊗ blocked: …` | on a card | waits on a declared prerequisite that was **closed without merging**; that card is not drawn, see below |
+| `✓ approved @handle` | on a card | a human teammate, not `PR_AUTHOR` and not a bot, approved it; see [What a card's border weight means](#what-a-cards-border-weight-means) |
 | `GATED` | on an **edge** | release-gated: a published release clears it, a merge does not |
 
 `✓ merged` is the one marker that displaces another: a merged card never lifts a stale `⊘` out of
@@ -232,7 +232,7 @@ has approved that pull request, decided in `src/reviews.mjs` and attached to eac
 `attachApprovals()` in `build.mjs` before the layout runs. It is a second, independent axis from the
 fill: the fill is what the PR *is*, the border weight is whether somebody has signed it off, and a
 card can be any state and approved, or any state and not. A stroke width is not something a reader
-can measure on its own, so it never carries the fact alone — every approved card also prints
+can measure on its own, so it never carries the fact alone: every approved card also prints
 `✓ approved @handle` (or `+N` past two names) and the border weight is spelled out in full in the
 card's hover title and in the SVG's `<desc>`.
 
@@ -240,8 +240,8 @@ card's hover title and in the SVG's `<desc>`.
 endpoint is an append-only log, so a reviewer who approved and later requested changes reads as
 `CHANGES_REQUESTED`, not approved, and a review that was dismissed reads as `DISMISSED` regardless of
 what it originally said. `COMMENTED` and `PENDING` are not verdicts and never retract a standing
-approval. A bot's review never counts — by `user.type`, by a `[bot]` login suffix, or by name for
-`chai3-bot`, which is automation under an ordinary user account — and neither does `PR_AUTHOR`'s own,
+approval. A bot's review never counts, whether by `user.type`, by a `[bot]` login suffix, or by name
+for `chai3-bot` (automation under an ordinary user account), and neither does `PR_AUTHOR`'s own,
 through the same "is this mine" predicate the rest of the build uses.
 
 **A withheld card names nobody, reviewer included.** Reviews are not fetched for a hidden node at
