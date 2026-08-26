@@ -1,9 +1,10 @@
-// HUMAN APPROVAL -- the thing a card's BORDER WEIGHT encodes.
+// HUMAN REVIEW -- the thing a card's BORDER encodes.
 //
-// A card is drawn with a thicker border when a human teammate has approved that
-// pull request. It is a second, independent axis from the fill: the fill is what
-// the PR IS (open, draft, merged), the border weight is whether somebody has
-// signed it off. A PR can be any state and approved, or any state and not.
+// A card is drawn with a thicker, coloured border when a human teammate has
+// taken a deciding position on that pull request: green for approved, red for
+// changes requested. It is a second, independent axis from the fill: the fill
+// is what the PR IS (open, draft, merged), the border is whether and how
+// somebody has weighed in. A PR can be any state and either, or neither.
 //
 // TWO THINGS THIS FILE IS CAREFUL ABOUT, because both of them are ways to
 // overstate an approval that is not there.
@@ -102,10 +103,25 @@ export function humanApprovers(reviews, isSelf = () => false) {
     .map(r => r.login);
 }
 
+// The handles of the humans whose latest word on this PR is CHANGES_REQUESTED.
+// Same filters, same ordering, as humanApprovers above -- the only difference is
+// the state it selects for.
+export function humanChangesRequested(reviews, isSelf = () => false) {
+  return [...latestReviewByReviewer(reviews).values()]
+    .filter(r => r.state === 'CHANGES_REQUESTED')
+    .filter(r => !isBotReviewer(r.user))
+    .filter(r => !isSelf(r.login))
+    .sort((a, b) => a.at - b.at || a.i - b.i)
+    .map(r => r.login);
+}
+
 // The marker glyph. A tick, because that is what an approval is; the word
 // "approved" travels with it everywhere it is printed, so the glyph is never
 // asked to carry the meaning on its own.
 export const APPROVED_GLYPH = '✓';
+
+// A cross, the tick's opposite, for the same reason: the word travels with it.
+export const CHANGES_REQUESTED_GLYPH = '✗';
 
 // The card marker, which has one card-width line to say it in. Two handles fit;
 // past that the rest are counted, because a truncated list of handles would name
@@ -118,10 +134,36 @@ export function approvedText(logins) {
   return `approved ${shown.join(', ')}${rest ? ` +${rest}` : ''}`;
 }
 
+export function changesRequestedText(logins) {
+  const list = (logins || []).filter(Boolean);
+  if (!list.length) return null;
+  const shown = list.slice(0, 2).map(l => `@${l}`);
+  const rest = list.length - shown.length;
+  return `changes requested ${shown.join(', ')}${rest ? ` +${rest}` : ''}`;
+}
+
 // The long form, for the card's hover text and the text alternative. Nothing is
 // truncated here: every approver is named.
 export function approvedLabel(logins) {
   const list = (logins || []).filter(Boolean);
   if (!list.length) return null;
   return `approved by ${list.map(l => `@${l}`).join(', ')}`;
+}
+
+export function changesRequestedLabel(logins) {
+  const list = (logins || []).filter(Boolean);
+  if (!list.length) return null;
+  return `changes requested by ${list.map(l => `@${l}`).join(', ')}`;
+}
+
+// A card's ONE review state, chosen from the two lists build.mjs attaches to a
+// node. A PR can have an approver and a separate reviewer asking for changes at
+// the same time; changes-requested wins, because it is the more urgent of the
+// two and the one that actually blocks a merge. This is the single fact every
+// representation of a card (border, on-card marker, hover title, <desc>) reads,
+// so none of them can disagree about which state a card is in.
+export function reviewState(approvedBy, changesRequestedBy) {
+  if ((changesRequestedBy || []).some(Boolean)) return 'changesRequested';
+  if ((approvedBy || []).some(Boolean)) return 'approved';
+  return 'waiting';
 }

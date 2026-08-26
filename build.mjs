@@ -98,7 +98,7 @@ import {
 } from './src/github.mjs';
 import { parseDeclarations } from './src/declarations.mjs';
 import { classify } from './src/ci.mjs';
-import { humanApprovers } from './src/reviews.mjs';
+import { humanApprovers, humanChangesRequested } from './src/reviews.mjs';
 import { openPrState, PR_STATES, prState } from './src/state.mjs';
 import { layoutGraph, shortRef } from './src/graph.mjs';
 import { render } from './src/render.mjs';
@@ -691,10 +691,10 @@ async function main() {
     pr.ci.baseSha = baseSha ? baseSha.slice(0, 7) : null;
   }
 
-  const approvedCount = await attachApprovals(graph.nodes, getReviews, isMine);
+  const reviewCounts = await attachReviewStatus(graph.nodes, getReviews, isMine);
   console.log(
-    `reviews: ${approvedCount} of ${graph.nodes.filter(n => !n.hidden).length} drawn card(s) ` +
-      `carry a human approval`
+    `reviews: ${reviewCounts.approved} of ${graph.nodes.filter(n => !n.hidden).length} drawn ` +
+      `card(s) carry a human approval, ${reviewCounts.changesRequested} carry a changes-requested`
   );
 
   // BEFORE the layout, because a card that carries an avatar reserves room for
@@ -833,15 +833,18 @@ export async function collectAvatars(nodes, fetchAvatar) {
   return defs;
 }
 
-export async function attachApprovals(nodes, fetchReviews, isSelf = () => false) {
+export async function attachReviewStatus(nodes, fetchReviews, isSelf = () => false) {
   let approved = 0;
+  let changesRequested = 0;
   for (const n of nodes || []) {
     if (n.hidden) continue;
     const reviews = await fetchReviews(n.repo, n.number);
     n.approvedBy = humanApprovers(reviews, isSelf);
+    n.changesRequestedBy = humanChangesRequested(reviews, isSelf);
     if (n.approvedBy.length) approved++;
+    if (n.changesRequestedBy.length) changesRequested++;
   }
-  return approved;
+  return { approved, changesRequested };
 }
 
 // WHAT STATE A CARD OF ITS OWN MAY BE IN.
