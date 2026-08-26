@@ -103,9 +103,6 @@ export function humanApprovers(reviews, isSelf = () => false) {
     .map(r => r.login);
 }
 
-// The handles of the humans whose latest word on this PR is CHANGES_REQUESTED.
-// Same filters, same ordering, as humanApprovers above -- the only difference is
-// the state it selects for.
 export function humanChangesRequested(reviews, isSelf = () => false) {
   return [...latestReviewByReviewer(reviews).values()]
     .filter(r => r.state === 'CHANGES_REQUESTED')
@@ -120,7 +117,6 @@ export function humanChangesRequested(reviews, isSelf = () => false) {
 // asked to carry the meaning on its own.
 export const APPROVED_GLYPH = '✓';
 
-// A cross, the tick's opposite, for the same reason: the word travels with it.
 export const CHANGES_REQUESTED_GLYPH = '✗';
 
 // The card marker, which has one card-width line to say it in. Two handles fit;
@@ -156,12 +152,6 @@ export function changesRequestedLabel(logins) {
   return `changes requested by ${list.map(l => `@${l}`).join(', ')}`;
 }
 
-// A card's ONE review state, chosen from the two lists build.mjs attaches to a
-// node. A PR can have an approver and a separate reviewer asking for changes at
-// the same time; changes-requested wins, because it is the more urgent of the
-// two and the one that actually blocks a merge. This is the single fact every
-// representation of a card (border, on-card marker, hover title, <desc>) reads,
-// so none of them can disagree about which state a card is in.
 export function reviewState(approvedBy, changesRequestedBy) {
   if ((changesRequestedBy || []).some(Boolean)) return 'changesRequested';
   if ((approvedBy || []).some(Boolean)) return 'approved';

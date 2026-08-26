@@ -2633,6 +2633,17 @@ await t('NEGATIVE: both an approver and a changes-requester draws changesRequest
   assert.match(html, /<tspan class="g">✗<\/tspan> changes requested @zed/);
   assert.doesNotMatch(html, /approved @amy/, 'the approver is not the card\'s state once changes are requested');
 });
+await t('NEGATIVE: the hover title and the accessible text pick the same winner as the card face', () => {
+  const g = buildGraph([sp(491)], mine);
+  const n = at(g, `${S}#491`);
+  n.approvedBy = ['amy'];
+  n.changesRequestedBy = ['zed'];
+  g.layout = layoutGraph(g);
+  assert.match(nodeTitleText(n), /changes requested by @zed/);
+  assert.doesNotMatch(nodeTitleText(n), /approved by @amy/, 'the hover title agrees with the card face');
+  assert.match(descRef(n), /changes requested by @zed/);
+  assert.doesNotMatch(descRef(n), /approved by @amy/, 'the accessible text agrees with the card face too');
+});
 await t('a card with nobody reviewing draws the ordinary thin, unmarked stroke', () => {
   const g = buildGraph([sp(491)], mine);
   g.layout = layoutGraph(g);

@@ -123,11 +123,6 @@ const PAD = 10;
 // like the rest of the geometry, so the border weight survives the stylesheet
 // being stripped. 1 to 2.5 is a difference that reads at a glance next to an
 // ordinary card; it is still never the only thing saying so (see nodeMarks()).
-// The border's colour, which carries which way the review went, is a CSS rule
-// (svg.depgraph .node.approved .box / .changesRequested .box below) rather than
-// a presentation attribute, because it has to win over the state-coloured line
-// the same rule set gives every card by default, and a class selector on the
-// review outcome is naturally more specific than one on the state alone.
 export const BOX_STROKE = 1;
 export const BOX_STROKE_REVIEWED = 2.5;
 
@@ -332,10 +327,6 @@ export const nodeChangesRequestedBy = n =>
   !n || n.hidden || !Array.isArray(n.changesRequestedBy) ? [] : n.changesRequestedBy.filter(Boolean);
 export const nodeChangesRequested = n => nodeChangesRequestedBy(n).length > 0;
 
-// The one review state a card is in, changes-requested winning over approved
-// when a PR has both (see src/reviews.mjs reviewState()). Every place a card
-// says anything about review status -- the border, the on-card marker, the
-// hover title, the <desc> -- reads this function and none of them another.
 export const nodeReviewState = n => reviewState(nodeApprovers(n), nodeChangesRequestedBy(n));
 
 // The markers a card is allowed to carry. Everything else that used to be a
@@ -830,10 +821,6 @@ export function graphDesc(graph) {
       ' the usual case and is left unmarked below; anything else is named in brackets after the' +
       ' reference. The only merged pull requests drawn are prerequisites that have already' +
       ' landed.',
-    // The border, which is the one channel that is nothing but geometry and
-    // colour. Neither can be described to a reader who is not looking at the
-    // drawing, so both are stated here as a fact about the pull request instead,
-    // and every reviewed card is named as such where it is listed.
     'A card is drawn with a thicker border when a human other than the page author has taken a' +
       ' deciding position on it: green for an approval, red for changes requested, and every one' +
       ' of those cards also prints a tick or a cross and the reviewer\'s handles, so the border is' +
@@ -1065,8 +1052,7 @@ export function graphSvg(graph, ids = {}) {
     const inner = [
       // The border weight is the reviewed-or-not channel, and it is a
       // presentation attribute for the same reason the rest of the geometry is:
-      // with the stylesheet stripped a reviewed card still draws thicker. The
-      // colour, which way the review went, comes from the `.node` class below.
+      // with the stylesheet stripped a reviewed card still draws thicker.
       `<rect class="box" x="${n.x}" y="${n.y}" width="${NODE_W}" height="${c.height}" rx="6"` +
         ` fill="none" stroke="currentColor"` +
         ` stroke-width="${c.reviewState === 'waiting' ? BOX_STROKE : BOX_STROKE_REVIEWED}"/>`,
