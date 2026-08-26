@@ -92,11 +92,13 @@ import {
   getPr,
   getReleases,
   getRepo,
+  getReviews,
   openPrsInRepo,
   searchOpenPrs
 } from './src/github.mjs';
 import { parseDeclarations } from './src/declarations.mjs';
 import { classify } from './src/ci.mjs';
+import { humanApprovers } from './src/reviews.mjs';
 import { openPrState, PR_STATES, prState } from './src/state.mjs';
 import { layoutGraph, shortRef } from './src/graph.mjs';
 import { render } from './src/render.mjs';
@@ -689,6 +691,12 @@ async function main() {
     pr.ci.baseSha = baseSha ? baseSha.slice(0, 7) : null;
   }
 
+  const approvedCount = await attachApprovals(graph.nodes, getReviews, isMine);
+  console.log(
+    `reviews: ${approvedCount} of ${graph.nodes.filter(n => !n.hidden).length} drawn card(s) ` +
+      `carry a human approval`
+  );
+
   // BEFORE the layout, because a card that carries an avatar reserves room for
   // it on its ref line, and cardOf() is what layoutGraph() measures with.
   graph.avatars = await collectAvatars(graph.nodes, getAvatar);
@@ -823,6 +831,17 @@ export async function collectAvatars(nodes, fetchAvatar) {
     n.avatarId = rec && rec.id ? rec.id : null;
   }
   return defs;
+}
+
+export async function attachApprovals(nodes, fetchReviews, isSelf = () => false) {
+  let approved = 0;
+  for (const n of nodes || []) {
+    if (n.hidden) continue;
+    const reviews = await fetchReviews(n.repo, n.number);
+    n.approvedBy = humanApprovers(reviews, isSelf);
+    if (n.approvedBy.length) approved++;
+  }
+  return approved;
 }
 
 // WHAT STATE A CARD OF ITS OWN MAY BE IN.

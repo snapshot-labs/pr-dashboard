@@ -96,7 +96,7 @@ the card is careful not to print.
 Everything else that was a status label is **off the card**: CI wording, the rank badge, the
 `no prerequisites` / `blocked ×N` pair. None of them is a dependency or a merge order, and together
 they were most of the card. `draft` was one of them and came back as a fill, which costs no line.
-Three markers survive, each with a legend entry under the drawing, because each one changes
+Several markers survive, each with a legend entry under the drawing, because each one changes
 *whether or when* something can merge:
 
 | Marker | Where | Means |
@@ -107,6 +107,8 @@ Three markers survive, each with a legend entry under the drawing, because each 
 | dashed outline | on a card | not one of `PR_AUTHOR`'s open PRs: somebody else's, or a prerequisite of theirs that has already merged |
 | dotted outline | on a card | a **tracked bot**'s open PR (`PR_BOT_AUTHORS`): scheduled here like `PR_AUTHOR`'s own, still marked `◇ @handle`, still outside the open-PR count |
 | `⊘ …` | on a card | the PR's **own title** says do not merge |
+| `⊗ blocked: …` | on a card | waits on a declared prerequisite that was **closed without merging** — that card is not drawn, see below |
+| `✓ approved @handle` | on a card | a human teammate, not `PR_AUTHOR` and not a bot, approved it — see [What a card's border weight means](#what-a-cards-border-weight-means) |
 | `GATED` | on an **edge** | release-gated: a published release clears it, a merge does not |
 
 `✓ merged` is the one marker that displaces another: a merged card never lifts a stale `⊘` out of
@@ -222,6 +224,29 @@ blocking: the card is filled merged because that is what the PR *is*, while the 
 PR; whether a dependency is cleared is a property of an *edge*.
 
 Today's build: **19 open, 3 draft, 0 merged.**
+
+## What a card's border weight means
+
+A card is drawn with a **thicker outline** (`stroke-width` 2.5 instead of 1) when a human teammate
+has approved that pull request, decided in `src/reviews.mjs` and attached to each node by
+`attachApprovals()` in `build.mjs` before the layout runs. It is a second, independent axis from the
+fill: the fill is what the PR *is*, the border weight is whether somebody has signed it off, and a
+card can be any state and approved, or any state and not. A stroke width is not something a reader
+can measure on its own, so it never carries the fact alone — every approved card also prints
+`✓ approved @handle` (or `+N` past two names) and the border weight is spelled out in full in the
+card's hover title and in the SVG's `<desc>`.
+
+**What counts as approved.** Only each reviewer's *latest* deciding review: GitHub's reviews
+endpoint is an append-only log, so a reviewer who approved and later requested changes reads as
+`CHANGES_REQUESTED`, not approved, and a review that was dismissed reads as `DISMISSED` regardless of
+what it originally said. `COMMENTED` and `PENDING` are not verdicts and never retract a standing
+approval. A bot's review never counts — by `user.type`, by a `[bot]` login suffix, or by name for
+`chai3-bot`, which is automation under an ordinary user account — and neither does `PR_AUTHOR`'s own,
+through the same "is this mine" predicate the rest of the build uses.
+
+**A withheld card names nobody, reviewer included.** Reviews are not fetched for a hidden node at
+all, and `nodeApprovers()` blanks `approvedBy` on one regardless, the same two-lock pattern the
+avatar and title redaction use.
 
 ## Accessibility, and what removing the list cost
 
@@ -482,9 +507,11 @@ Your own private PRs are the one thing not drawn at all: they are withheld and c
 
 ## Tokens
 
-- **`PR_DASHBOARD_TOKEN`** (repo secret) — a **read-only** PAT used to read PRs, checks and
+- **`PR_DASHBOARD_TOKEN`** (repo secret) — a **read-only** PAT used to read PRs, checks, reviews and
   releases across the org. Fine-grained: *Pull requests: read*, *Contents: read*,
-  *Metadata: read* on the `snapshot-labs` repos. Classic equivalent: `repo` + `read:org`.
+  *Metadata: read* on the `snapshot-labs` repos. Classic equivalent: `repo` + `read:org`. The
+  reviews `getReviews()` fetches for the approval marker are a pull-request sub-resource, so
+  *Pull requests: read* already covers them; no separate scope or token.
   Required, because the Action's built-in `GITHUB_TOKEN` is scoped to **this** repo and cannot
   search the org — with it the page silently under-reports.
 - **`NETLIFY_AUTH_TOKEN`** + **`NETLIFY_SITE_ID`** (repo secrets) — deploy target. The deploy
