@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>PR dependency graph — merge left to right — tony8713 @ snapshot-labs</title>
+<style>
+:root{
+  --surface:#fcfcfb; --raised:#ffffff;
+  --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+  --rule:#e1e0d9; --ring:rgba(11,11,11,.10);
+  --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b;
+  --good-ink:#006300; --warning-ink:#7a5200; --serious-ink:#8c3d1a; --critical-ink:#a52020;
+  /* CARD FILL = PR STATE. GitHub's own PR colours, so it is a mapping a reader
+     already knows: green open, grey draft, purple merged, red closed. Kept as
+     low-saturation washes because every card carries one and a PR title has to
+     stay legible on top of it. The -line variable is the border and the glyph,
+     the darker end of the same hue. The fills are near-isoluminant on purpose,
+     so what survives greyscale is the glyph and the word, not the wash. */
+  --state-open:#e8f5ec;   --state-open-line:#1a7f37;
+  --state-draft:#e7e6df;  --state-draft-line:#56554e;
+  --state-merged:#f1eafc; --state-merged-line:#6b3cc0;
+  --state-closed:#fbeceb; --state-closed-line:#cf222e;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --surface:#1a1a19; --raised:#222221;
+    --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
+    --rule:#2c2c2a; --ring:rgba(255,255,255,.10);
+    --good-ink:#4cc44c; --warning-ink:#fab219; --serious-ink:#ec835a; --critical-ink:#e46a6a;
+    /* Dark mode is not the light wash dimmed: the fill goes DARKER than the card
+       surface and the border and glyph go brighter, so the light-fill/dark-edge
+       relationship is inverted rather than lost. */
+    --state-open:#173322;   --state-open-line:#4cc44c;
+    --state-draft:#37372f;  --state-draft-line:#b6b5aa;
+    --state-merged:#282141; --state-merged-line:#a371f7;
+    --state-closed:#3a2221; --state-closed-line:#e46a6a;
+  }
+}
+*{box-sizing:border-box}
+body{margin:0;padding:32px 20px 64px;background:var(--surface);color:var(--ink);
+  font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:100%;margin:0 auto}
+h1{font-size:20px;margin:0 0 4px}
+.sub{color:var(--ink2);font-size:13px;margin:0 0 16px}
+a{color:inherit}
+
+
+.graph{margin:0 0 22px}
+.graph figcaption{font-size:12px;color:var(--ink2);margin:0 0 10px}
+.graph figcaption strong{color:var(--ink)}
+/* A wide graph is the expected shape: one column per rank, and merge order is
+   the horizontal axis, so depth costs width. It SCROLLS sideways rather than
+   being scaled to fit -- the card text is 11px already, and shrinking it to fit
+   a phone would cost the page the thing it is for. */
+.gwrap{overflow-x:auto;overflow-y:hidden;padding-bottom:6px}
+svg.depgraph{display:block;width:656px;height:921px;max-width:none;
+  color:var(--ink2)}
+svg.depgraph .box{stroke:var(--rule);fill:var(--raised)}
+/* THE FILL IS THE STATE. One rule per state, naming the same variables the
+   legend swatch names, so the key and the card cannot drift apart. Never colour
+   on its own: .st prints the same thing as a glyph and a word. */
+svg.depgraph .st-open .box{fill:var(--state-open);stroke:var(--state-open-line)}
+svg.depgraph .st-draft .box{fill:var(--state-draft);stroke:var(--state-draft-line)}
+svg.depgraph .st-merged .box{fill:var(--state-merged);stroke:var(--state-merged-line)}
+svg.depgraph .st-closed .box{fill:var(--state-closed);stroke:var(--state-closed-line)}
+svg.depgraph .st-unknown .box{fill:var(--raised);stroke:var(--rule)}
+svg.depgraph .st{font:9.5px ui-sans-serif,system-ui,sans-serif;fill:var(--ink2);letter-spacing:.02em}
+svg.depgraph .st-open .st{fill:var(--state-open-line)}
+svg.depgraph .st-draft .st{fill:var(--state-draft-line)}
+svg.depgraph .st-merged .st{fill:var(--state-merged-line)}
+svg.depgraph .st-closed .st{fill:var(--state-closed-line)}
+/* Not one of the author's own PRs: still filled by its state, but dashed, so
+   "whose PR" and "what state" stay two separate channels. */
+svg.depgraph .node.dep .box{stroke-dasharray:4 3}
+/* A TRACKED BOT's open PR: dotted, between the author's solid card and the dashed
+   card of a PR that is merely in the way. The three patterns are one channel with
+   three values -- whose work this is -- and it is the SECOND channel, not the
+   first: every card that is not the page author's also prints the author's handle
+   next to a diamond, so nothing rests on telling one dash pattern from another,
+   and nothing here rests on colour at all. */
+svg.depgraph .node.bot .box{stroke-dasharray:1 3}
+/* The author's avatar. Inlined at build time, so it is not a request: this page
+   still loads nothing at all. It REINFORCES the identity the card already
+   states -- the outline says whose kind of work it is, the diamond marker names
+   the author -- and it is never the only carrier of either, so a reader with images
+   off, or a browser that cannot draw it, loses no fact. The ring doubles as the
+   placeholder: an avatar that fails to draw leaves a disc, not a hole. */
+svg.depgraph .avring{stroke:var(--rule)}
+/* REVIEWED BY A HUMAN = a thicker border; WHICH WAY = its colour. The width is a
+   presentation attribute on the rect (see graphSvg), so these two rules only
+   have to carry the colour and keep the DASH readable at the heavier weight:
+   4-on-3 at 2.5px starts to read as a solid line, which would take the "not
+   mine" channel away from a card that is both. A reviewed foreign card is a
+   thick DASHED box in the review colour, and it carries both markers. Three
+   classes deep so these beat the .st-<state> rules above on specificity alone,
+   with no source-order dependency between the two groups. */
+svg.depgraph .node.approved .box{stroke:var(--good-ink)}
+svg.depgraph .node.changesRequested .box{stroke:var(--critical-ink)}
+svg.depgraph .node.dep.approved .box,svg.depgraph .node.dep.changesRequested .box{
+  stroke-dasharray:6 4}
+svg.depgraph a{text-decoration:none}
+/* the card: the ref identifies it, the TITLE is what it is */
+svg.depgraph .ref{font:600 10.5px ui-monospace,SFMono-Regular,Menlo,monospace;fill:var(--ink2)}
+svg.depgraph .ttl{font:11px ui-sans-serif,system-ui,sans-serif;fill:var(--ink)}
+svg.depgraph .ttl.dim{fill:var(--muted);font-style:italic}
+svg.depgraph .mark{font:9.5px ui-sans-serif,system-ui,sans-serif;fill:var(--ink2)}
+svg.depgraph .mark .g{font-family:ui-monospace,monospace}
+svg.depgraph .mark.m-critical{fill:var(--critical-ink);font-weight:700}
+svg.depgraph .mark.m-foreign{fill:var(--ink2);font-weight:600}
+/* The words that carry the border's colour. Not decoration: a stroke colour is
+   not something every reader can tell apart, so these lines are what the
+   border means. */
+svg.depgraph .mark.m-approved{fill:var(--good-ink);font-weight:600}
+svg.depgraph .mark.m-changesRequested{fill:var(--critical-ink);font-weight:600}
+svg.depgraph .edge{stroke:var(--ink2)}
+svg.depgraph .edge.cross{stroke-dasharray:5 4}
+/* An arrow whose tail has already landed. Lighter, and labelled -- the label is
+   the part that carries it, since a lighter grey is a difference a reader has to
+   notice rather than one they can read. */
+svg.depgraph .edge.met{stroke:var(--muted)}
+svg.depgraph .ahead{fill:var(--ink2)}
+/* The arrowhead has to lighten with its line: an SVG marker does not inherit the
+   stroke of the path that references it, so a met edge that kept the default
+   head came out as a light line with a full-weight point on the end of it. Hence
+   the second <marker> def rather than a class on the path. */
+svg.depgraph .ahead.met{fill:var(--muted)}
+/* the column header: rank name, what it waits for, and how many PRs stand under
+   it with no order between them */
+svg.depgraph .rk{font:700 9px ui-sans-serif,system-ui,sans-serif;letter-spacing:.06em;fill:var(--ink2)}
+svg.depgraph .rksub{font:9px ui-sans-serif,system-ui,sans-serif;fill:var(--muted)}
+svg.depgraph .rknote{font:9px ui-sans-serif,system-ui,sans-serif;fill:var(--ink2)}
+svg.depgraph .rknote.cyc{fill:var(--critical-ink)}
+svg.depgraph .colhead.done .rk,svg.depgraph .colhead.done .rksub{fill:var(--good-ink)}
+svg.depgraph .rkrule{stroke:var(--rule)}
+svg.depgraph .elabel{font:700 8.5px ui-sans-serif,system-ui,sans-serif;letter-spacing:.06em;
+  fill:var(--serious-ink);paint-order:stroke;stroke:var(--surface);
+  stroke-width:3px;stroke-linejoin:round}
+svg.depgraph .elabel.met{fill:var(--good-ink)}
+.legend{margin:10px 0 0;font-size:11px;color:var(--muted);display:flex;gap:14px;flex-wrap:wrap}
+.legend span{white-space:nowrap}
+.legend .k{font-family:ui-monospace,monospace;color:var(--ink2)}
+.legend .k.crit{color:var(--critical-ink);font-weight:700}
+.legend .k.gate{color:var(--serious-ink);font-weight:700;letter-spacing:.06em}
+.legend .k.met{color:var(--good-ink);font-weight:700;letter-spacing:.06em}
+.legend .k.appr{color:var(--good-ink);font-weight:700}
+.legend .k.chreq{color:var(--critical-ink);font-weight:700}
+/* The card-fill key. The swatch shows the fill AND the glyph that goes with it,
+   so the entry still reads as three different things in greyscale. Not scoped to
+   the legend: the banner uses the same swatch, and one rule keeps them equal. */
+.sw{display:inline-flex;align-items:center;justify-content:center;width:20px;height:13px;
+  border:1px solid var(--rule);border-radius:3px;background:var(--raised);color:var(--ink2);
+  font:9px ui-monospace,SFMono-Regular,Menlo,monospace;margin-right:5px;vertical-align:-2px}
+.sw.st-open{background:var(--state-open);border-color:var(--state-open-line);
+  color:var(--state-open-line)}
+.sw.st-draft{background:var(--state-draft);border-color:var(--state-draft-line);
+  color:var(--state-draft-line)}
+.sw.st-merged{background:var(--state-merged);border-color:var(--state-merged-line);
+  color:var(--state-merged-line)}
+.sw.st-closed{background:var(--state-closed);border-color:var(--state-closed-line);
+  color:var(--state-closed-line)}
+
+/* Everything that is not the drawing lives in one of these.
+   details/summary is native HTML: it collapses with no scripting, no library and
+   no runtime of any kind, which is the only reason the page can afford to keep
+   all of this prose at all. A closed block still renders its own summary, so the
+   count of withheld PRs and the count of undrawable edges stay on the page even
+   while their explanations are shut -- the page never stops admitting what it is
+   not showing.
+   With the stylesheet stripped these lose their frames and their summaries stop
+   looking clickable, but the disclosure itself is the browser's, not this file's:
+   a summary still opens its block, and nothing here is unreachable. */
+details.fold{border:1px solid var(--ring);border-radius:6px;background:var(--raised);
+  margin:0 0 8px}
+details.fold>summary{cursor:pointer;padding:9px 12px;font-size:13px;font-weight:600;
+  color:var(--ink)}
+details.fold[open]>summary{border-bottom:1px solid var(--rule)}
+details.fold>*:not(summary){margin:10px 12px}
+details.fold p,details.fold li{font-size:13px;color:var(--ink2)}
+details.fold strong{color:var(--ink)}
+details.fold ul{padding-left:18px}
+details.fold li{margin:4px 0}
+details.fold pre{background:var(--surface);border:1px solid var(--rule);border-radius:4px;
+  padding:10px;overflow-x:auto;font-size:12px}
+/* The two folds that report something missing rather than explaining something:
+   accented, so a shut block still reads as a caveat and not as more help. */
+details.fold.warn{border-left:3px solid var(--warning)}
+details.fold.crit{border-left:3px solid var(--critical)}
+/* The graph is the centre piece. The folded stack sits under it, quiet, and is
+   capped at reading width even though the canvas above it is not. */
+.folds{margin-top:26px;max-width:940px}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
+  background:var(--surface);border:1px solid var(--rule);border-radius:3px;padding:0 4px}
+</style>
+</head><body><main>
+
+<h1>Open PRs — merge left to right</h1>
+<p class="sub">tony8713 · snapshot-labs · 10 open PRs · 3 more by @chai3-bot ·
+  built 2026-09-05 20:30 UTC</p>
+
+<figure class="graph">
+<figcaption><strong>Merge order reads left to right.</strong> A PR sits to the right of everything it
+needs, so the leftmost column merges first. Two PRs in the same column have
+no order between them. 14 PRs,
+2 dependency edges,
+2 ranks —
+<strong>one column per rank, earliest on the left</strong>.</figcaption>
+<div class="gwrap">
+<svg class="depgraph" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 656 921" width="656" height="921" role="img" aria-labelledby="graph-title graph-desc">
+<title id="graph-title">Dependency graph: 14 pull requests, 2 dependency edges</title>
+<desc id="graph-desc">Each pull request is drawn exactly once, as a card carrying its repository, its number and its title. The graph reads left to right: an arrow runs from a prerequisite rightward to the pull request that waits on it, so the leftmost column merges first and the rightmost column merges last. One column is one rank, and pull requests stacked in the same column are independent of one another: they can merge in any order or at the same time, so their vertical position carries no meaning. A whole dependency chain is drawn whenever at least one pull request in it belongs to the page author or to a tracked bot, so some of the cards below are somebody else's. Every one that is not the page author's names its author where it is listed; the rest are the page author's own. A tracked bot's pull request is named as one: it is scheduled here like the page author's own work, whereas a card named only as somebody else's is on the page because it stands in the way of work that is. The fill colour of a card is the state of that pull request, and every card also prints that state as a word beside its reference, so nothing here is carried by colour alone. Open is the usual case and is left unmarked below; anything else is named in brackets after the reference. The only merged pull requests drawn are prerequisites that have already landed. A card is drawn with a thicker border when a human other than the page author has taken a deciding position on it: green for an approval, red for changes requested, and every one of those cards also prints a tick or a cross and the reviewer's handles, so the border is never the only thing saying it. Only each reviewer's latest review counts, so a reviewer who approved and later requested changes reads as changes requested, not approved; a review by a bot never counts, and neither does the page author's own. A pull request with both an approver and a separate reviewer asking for changes draws as changes requested, the more urgent of the two. Where either is listed below, the reviewers are named in brackets after the reference. 1 of these has already merged and is drawn because something here still depends on it: stamp#593 (by @chai3-bot, not the page author's; merged; approved by @wa0x6e). Each of those is a wait that is already over: the card is drawn so the chain behind an open pull request can be read whole, not because anything is still held up by it. The whole structure follows, in words. Column 1 of 2, which merges first, holds 12 pull requests, in any order among themselves: stamp#593 (by @chai3-bot, not the page author's; merged; approved by @wa0x6e), stamp#568 (changes requested by @wa0x6e), sx-monorepo#2331 (changes requested by @wa0x6e), stamp#632, brovider#565, stamp#598 (changes requested by @wa0x6e), stamp#586 (by @chai3-bot, a tracked bot; changes requested by @wa0x6e), stamp#580, schnaps-api#30 (changes requested by @wa0x6e), snapshot-webhook#299, sx-monorepo#2228 (changes requested by @wa0x6e), snapshot-docs#53 (by @chai3-bot, a tracked bot). Column 2 of 2, which merges last, holds 2 pull requests, in any order among themselves: stamp#594 (by @chai3-bot, a tracked bot), stamp#578. 2 dependency edges, each naming the prerequisite first and then the pull request that waits on it: stamp#568 before stamp#578; stamp#593 before stamp#594, already met.</desc>
+<defs><marker id="dep-arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path class="ahead" d="M0 0 L10 5 L0 10 Z" fill="currentColor"/></marker><marker id="dep-arrow-met" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto"><path class="ahead met" d="M0 0 L10 5 L0 10 Z" fill="currentColor"/></marker><clipPath id="av-clip"><circle cx="7" cy="7" r="7"/></clipPath><image id="av1" width="14" height="14" clip-path="url(#av-clip)" preserveAspectRatio="xMidYMid slice" href="data:image/png;base64,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"/><image id="av2" width="14" height="14" clip-path="url(#av-clip)" preserveAspectRatio="xMidYMid slice" href="data:image/jpeg;base64,/9j/2wCEAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDIBCQkJDAsMGA0NGDIhHCEyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMv/AABEIADAAMAMBIgACEQEDEQH/xAGiAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgsQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+gEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoLEQACAQIEBAMEBwUEBAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2dri4+Tl5ufo6ery8/T19vf4+fr/2gAMAwEAAhEDEQA/APGNsJ71KiAkFX46YqIPF/d/Stfw7psOt6zbWDSGJJHwXAyRniup+QR8yqlpNMpxEXA/uiopYGjYZyhI4DCvYrHwrpWj70jmupSeCWKgdMdMVXuPCmhztueCYn/rrUqNRy1WhvOWGVNOMm5drafeeQYZT9xTniliWVVMyEqqnBb0zWv4p0uHR9blt4FcQMoePJycH/64NZrNA5D8xIwOFU55qnocr8ioJV/umt7wZdRxeK7Hd8paQAfXIrD2n+7+lWdOaaDUreaGMtJHIHAHsc1VmTc9f1fxFpmmXRiu7tI5CN23BJx+FZEnjzQk6XLv/uxN/UVjeItMvZ9dtdQdbVy8WzynXzF5z16Z6/pWcdCvI9NuXuJLW3tbhi3Fqm8j/YPVRx61nOrWUrQirAoxtqy146ljvIdM1CBvklQjJHUcEfzNcdyQccsDkfStG4uxfaJFCDIyWsgSMMAOCDzx9KoQtJbyeYiAttK/MMjGMVo9dRbaF3j2q1aahHZJJGbLz2l4LB9pA9Bx3rM3t2OfrR5jf3atu6sQkdha+KbP7TFJf2dzHFCpYKx37yOi8AVV1XxBHPcPMzhVm+YxPgFOPTt9K5ctnOFIJHUHFV4raQSbmKkdeOp/GsveTsWrGmJoWj2QACPdnABxmk+X0qLc3daXJ9K2jorEPVn/2Q=="/></defs>
+<g class="colhead"><text class="rk" x="10" y="21" font-size="9">MERGES FIRST</text><text class="rksub" x="10" y="34" font-size="9">nothing to wait for</text><text class="rknote" x="10" y="46" font-size="9">12 PRs · any order</text><line class="rkrule" x1="10" y1="52" x2="280" y2="52" stroke="currentColor" stroke-width="1"/></g>
+<g class="colhead"><text class="rk" x="376" y="21" font-size="9">MERGES LAST</text><text class="rksub" x="376" y="34" font-size="9">waits on the rest</text><text class="rknote" x="376" y="46" font-size="9">2 PRs · any order</text><line class="rkrule" x1="376" y1="52" x2="646" y2="52" stroke="currentColor" stroke-width="1"/></g>
+<g class="edgeg"><title>stamp#568 → stamp#578 — merge stamp#568 before stamp#578 — branched from refactor/ens-batch-reverse-universal-resolver — open</title><path class="edge" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#dep-arrow)" d="M282 169.5 C 327 169.5, 327 170, 371 170"/></g>
+<g class="edgeg"><title>stamp#593 → stamp#594 — merge stamp#593 before stamp#594 — merged</title><path class="edge met" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#dep-arrow-met)" d="M282 91 C 327 91, 327 91.5, 371 91.5"/><text class="elabel met" x="327" y="103" font-size="8.5" text-anchor="middle">✓ MET</text></g>
+<g class="node own st-open"><title>brovider#565 — feat: cache and dedupe block-pinned deterministic RPC reads — open, and marked ready for review — CI green — nothing on this page has to merge before it — nothing on this page waits on it</title><a href="https://github.com/snapshot-labs/brovider/pull/565" target="_blank" rel="noopener"><rect class="box" x="10" y="358" width="270" height="52" rx="6" fill="none" stroke="currentColor" stroke-width="1"/><text class="ref" x="40" y="373" font-size="10.5">brovider#565</text><text class="st" x="270" y="373" font-size="9.5" text-anchor="end">○ open</text><g class="av" aria-hidden="true"><use href="#av1" x="20" y="362"/><circle class="avring" cx="27" cy="369" r="7" fill="none" stroke="currentColor" stroke-width="0.5"/></g><text class="ttl" x="20" y="388" font-size="11">feat: cache and dedupe block-pinned</text><text class="ttl" x="20" y="401" font-size="11">deterministic RPC reads</text></a></g>
+<g class="node own st-open changesRequested"><title>schnaps-api#30 — feat: alert when the EVM indexer stops keeping up — open, and marked ready for review — CI green — changes requested by @wa0x6e — nothing on this page has to merge before it — nothing on this page waits on it</title><a href="https://github.com/snapshot-labs/schnaps-api/pull/30" target="_blank" rel="noopener"><rect class="box" x="10" y="635" width="270" height="67" rx="6" fill="none" stroke="currentColor" stroke-width="2.5"/><text class="ref" x="40" y="650" font-size="10.5">schnaps-api#30</text><text class="st" x="270" y="650" font-size="9.5" text-anchor="end">○ open</text><g class="av" aria-hidden="true"><use href="#av1" x="20" y="639"/><circle class="avring" cx="27" cy="646" r="7" fill="none" stroke="currentColor" stroke-width="0.5"/></g><text class="ttl" x="20" y="665" font-size="11">feat: alert when the EVM indexer stops</text><text class="ttl" x="20" y="678" font-size="11">keeping up</text><text class="mark m-changesRequested" x="20" y="693" font-size="9.5"><tspan class="g">✗</tspan> changes requested @wa0x6e</text></a></g>
+<g class="node bot st-open"><title>snapshot-docs#53 — Add troubleshooting guide for voter issues — open, and marked ready for review — no checks — @chai3-bot — a tracked bot's PR, drawn and scheduled like the page author's — nothing on this page has to merge before it — nothing on this page waits on it</title><a href="https://github.com/snapshot-labs/snapshot-docs/pull/53" target="_blank" rel="noopener"><rect class="box" x="10" y="857" width="270" height="54" rx="6" fill="none" stroke="currentColor" stroke-width="1"/><text class="ref" x="40" y="872" font-size="10.5">snapshot-docs#53</text><text class="st" x="270" y="872" font-size="9.5" text-anchor="end">○ open</text><g class="av" aria-hidden="true"><use href="#av2" x="20" y="861"/><circle class="avring" cx="27" cy="868" r="7" fill="none" stroke="currentColor" stroke-width="0.5"/></g><text class="ttl" x="20" y="887" font-size="11">Add troubleshooting guide for voter issues</text><text class="mark m-foreign" x="20" y="902" font-size="9.5"><tspan class="g">◇</tspan> @chai3-bot</text></a></g>
+<g class="node own st-open"><title>snapshot-webhook#299 — fix: stop background workers and metrics on graceful shutdown — open, and marked ready for review — CI green — nothing on this page has to merge before it — nothing on this page waits on it</title><a href="https://github.com/snapshot-labs/snapshot-webhook/pull/299" target="_blank" rel="noopener"><rect class="box" x="10" y="714" width="270" height="52" rx="6" fill="none" stroke="currentColor" stroke-width="1"/><text class="ref" x="40" y="729" font-size="10.5">snapshot-webhook#299</text><text class="st" x="270" y="729" font-size="9.5" text-anchor="end">○ open</text><g class="av" aria-hidden="true"><use href="#av1" x="20" y="718"/><circle class="avring" cx="27" cy="725" r="7" fill="none" stroke="currentColor" stroke-width="0.5"/></g><text class="ttl" x="20" y="744" font-size="11">fix: stop background workers and metrics</text><text class="ttl" x="20" y="757" font-size="11">on graceful shutdown</text></a></g>
+<g class="node own st-open changesRequested"><title>stamp#568 — refactor(ens): batch reverse lookup through the Universal Resolver — open, and marked ready for review — CI green — changes requested by @wa0x6e — nothing on this page has to merge before it — merges before stamp#578</title><a href="https://github.com/snapshot-labs/stamp/pull/568" target="_blank" rel="noopener"><rect class="box" x="10" y="136" width="270" height="67" rx="6" fill="none" stroke="currentColor" stroke-width="2.5"/><text class="ref" x="40" y="151" font-size="10.5">stamp#568</text><text class="st" x="270" y="151" font-size="9.5" text-anchor="end">○ open</text><g class="av" aria-hidden="true"><use href="#av1" x="20" y="140"/><circle class="avring" cx="27" cy="147" r="7" fill="none" stroke="currentColor" stroke-width="0.5"/></g><text class="ttl" x="20" y="166" font-size="11">refactor(ens): batch reverse lookup</text><text class="ttl" x="20" y="179" font-size="11">through the Universal Resolver</text><text class="mark m-changesRequested" x="20" y="194" font-size="9.5"><tspan class="g">✗</tspan> changes requested @wa0x6e</text></a></g>
+<g class="node own st-open"><title>stamp#578 — refactor(ens): batch forward lookup through universal resolver — open, and marked ready for review — CI green — merges after stamp#568 — nothing on this page waits on it</title><a href="https://github.com/snapshot-labs/stamp/pull/578" target="_blank" rel="noopener"><rect class="box" x="376" y="144" width="270" height="52" rx="6" fill="none" stroke="currentColor" stroke-width="1"/><text class="ref" x="406" y="159" font-size="10.5">stamp#578</text><text class="st" x="636" y="159" font-size="9.5" text-anchor="end">○ open</text><g class="av" aria-hidden="true"><use href="#av1" x="386" y="148"/><circle class="avring" cx="393" cy="155" r="7" fill="none" stroke="currentColor" stroke-width="0.5"/></g><text class="ttl" x="386" y="174" font-size="11">refactor(ens): batch forward lookup</text><text class="ttl" x="386" y="187" font-size="11">through universal resolver</text></a></g>
+<g class="node own st-open"><title>stamp#580 — fix(resolvers): skip sibling TLD names — open, and marked ready for review — CI green — nothing on this page has to merge before it — nothing on this page waits on it</title><a href="https://github.com/snapshot-labs/stamp/pull/580" target="_blank" rel="noopener"><rect class="box" x="10" y="579" width="270" height="44" rx="6" fill="none" stroke="currentColor" stroke-width="1"/><text class="ref" x="40" y="594" font-size="10.5">stamp#580</text><text class="st" x="270" y="594" font-size="9.5" text-anchor="end">○ open</text><g class="av" aria-hidden="true"><use href="#av1" x="20" y="583"/><circle class="avring" cx="27" cy="590" r="7" fill="none" stroke="currentColor" stroke-width="0.5"/></g><text class="ttl" x="20" y="609" font-size="11">fix(resolvers): skip sibling TLD names</text></a></g>
+<g class="node bot st-open changesRequested"><title>stamp#586 — fix: close Redis when tests cannot connect — open, and marked ready for review — no checks — @chai3-bot — a tracked bot's PR, drawn and scheduled like the page author's — changes requested by @wa0x6e — nothing on this page has to merge before it — nothing on this page waits on it</title><a href="https://github.com/snapshot-labs/stamp/pull/586" target="_blank" rel="noopener"><rect class="box" x="10" y="501" width="270" height="66" rx="6" fill="none" stroke="currentColor" stroke-width="2.5"/><text class="ref" x="40" y="516" font-size="10.5">stamp#586</text><text class="st" x="270" y="516" font-size="9.5" text-anchor="end">○ open</text><g class="av" aria-hidden="true"><use href="#av2" x="20" y="505"/><circle class="avring" cx="27" cy="512" r="7" fill="none" stroke="currentColor" stroke-width="0.5"/></g><text class="ttl" x="20" y="531" font-size="11">fix: close Redis when tests cannot connect</text><text class="mark m-foreign" x="20" y="546" font-size="9.5"><tspan class="g">◇</tspan> @chai3-bot</text><text class="mark m-changesRequested" x="20" y="558" font-size="9.5"><tspan class="g">✗</tspan> changes requested @wa0x6e</text></a></g>
+<g class="node bot st-open"><title>stamp#594 — fix(api): classify get_owner upstream failures — open, and marked ready for review — no checks — @chai3-bot — a tracked bot's PR, drawn and scheduled like the page author's — merges after stamp#593 — nothing on this page waits on it</title><a href="https://github.com/snapshot-labs/stamp/pull/594" target="_blank" rel="noopener"><rect class="box" x="376" y="58" width="270" height="67" rx="6" fill="none" stroke="currentColor" stroke-width="1"/><text class="ref" x="406" y="73" font-size="10.5">stamp#594</text><text class="st" x="636" y="73" font-size="9.5" text-anchor="end">○ open</text><g class="av" aria-hidden="true"><use href="#av2" x="386" y="62"/><circle class="avring" cx="393" cy="69" r="7" fill="none" stroke="currentColor" stroke-width="0.5"/></g><text class="ttl" x="386" y="88" font-size="11">fix(api): classify get_owner upstream</text><text class="ttl" x="386" y="101" font-size="11">failures</text><text class="mark m-foreign" x="386" y="116" font-size="9.5"><tspan class="g">◇</tspan> @chai3-bot</text></a></g>
+<g class="node own st-open changesRequested"><title>stamp#598 — fix(image): reject non-image HTTP responses — open, and marked ready for review — CI green — changes requested by @wa0x6e — nothing on this page has to merge before it — nothing on this page waits on it</title><a href="https://github.com/snapshot-labs/stamp/pull/598" target="_blank" rel="noopener"><rect class="box" x="10" y="422" width="270" height="67" rx="6" fill="none" stroke="currentColor" stroke-width="2.5"/><text class="ref" x="40" y="437" font-size="10.5">stamp#598</text><text class="st" x="270" y="437" font-size="9.5" text-anchor="end">○ open</text><g class="av" aria-hidden="true"><use href="#av1" x="20" y="426"/><circle class="avring" cx="27" cy="433" r="7" fill="none" stroke="currentColor" stroke-width="0.5"/></g><text class="ttl" x="20" y="452" font-size="11">fix(image): reject non-image HTTP</text><text class="ttl" x="20" y="465" font-size="11">responses</text><text class="mark m-changesRequested" x="20" y="480" font-size="9.5"><tspan class="g">✗</tspan> changes requested @wa0x6e</text></a></g>
+<g class="node own st-open"><title>stamp#632 — fix(image): restrict avatar fetches to public http(s) hosts — open, and marked ready for review — CI green — nothing on this page has to merge before it — nothing on this page waits on it</title><a href="https://github.com/snapshot-labs/stamp/pull/632" target="_blank" rel="noopener"><rect class="box" x="10" y="294" width="270" height="52" rx="6" fill="none" stroke="currentColor" stroke-width="1"/><text class="ref" x="40" y="309" font-size="10.5">stamp#632</text><text class="st" x="270" y="309" font-size="9.5" text-anchor="end">○ open</text><g class="av" aria-hidden="true"><use href="#av1" x="20" y="298"/><circle class="avring" cx="27" cy="305" r="7" fill="none" stroke="currentColor" stroke-width="0.5"/></g><text class="ttl" x="20" y="324" font-size="11">fix(image): restrict avatar fetches to public</text><text class="ttl" x="20" y="337" font-size="11">http(s) hosts</text></a></g>
+<g class="node own st-open changesRequested"><title>sx-monorepo#2228 — feat(sequencer): add proposal re-score script — open, and marked ready for review — CI green — changes requested by @wa0x6e — nothing on this page has to merge before it — nothing on this page waits on it</title><a href="https://github.com/snapshot-labs/sx-monorepo/pull/2228" target="_blank" rel="noopener"><rect class="box" x="10" y="778" width="270" height="67" rx="6" fill="none" stroke="currentColor" stroke-width="2.5"/><text class="ref" x="40" y="793" font-size="10.5">sx-monorepo#2228</text><text class="st" x="270" y="793" font-size="9.5" text-anchor="end">○ open</text><g class="av" aria-hidden="true"><use href="#av1" x="20" y="782"/><circle class="avring" cx="27" cy="789" r="7" fill="none" stroke="currentColor" stroke-width="0.5"/></g><text class="ttl" x="20" y="808" font-size="11">feat(sequencer): add proposal re-score</text><text class="ttl" x="20" y="821" font-size="11">script</text><text class="mark m-changesRequested" x="20" y="836" font-size="9.5"><tspan class="g">✗</tspan> changes requested @wa0x6e</text></a></g>
+<g class="node own st-open changesRequested"><title>sx-monorepo#2331 — fix(ui): tear down WalletConnect sessions from other spaces' treasuries — open, and marked ready for review — CI green — changes requested by @wa0x6e — nothing on this page has to merge before it — nothing on this page waits on it</title><a href="https://github.com/snapshot-labs/sx-monorepo/pull/2331" target="_blank" rel="noopener"><rect class="box" x="10" y="215" width="270" height="67" rx="6" fill="none" stroke="currentColor" stroke-width="2.5"/><text class="ref" x="40" y="230" font-size="10.5">sx-monorepo#2331</text><text class="st" x="270" y="230" font-size="9.5" text-anchor="end">○ open</text><g class="av" aria-hidden="true"><use href="#av1" x="20" y="219"/><circle class="avring" cx="27" cy="226" r="7" fill="none" stroke="currentColor" stroke-width="0.5"/></g><text class="ttl" x="20" y="245" font-size="11">fix(ui): tear down WalletConnect sessions</text><text class="ttl" x="20" y="258" font-size="11">from other spaces' treasuries</text><text class="mark m-changesRequested" x="20" y="273" font-size="9.5"><tspan class="g">✗</tspan> changes requested @wa0x6e</text></a></g>
+<g class="node dep st-merged approved"><title>stamp#593 — fix(errors): silence upstream RPC 5xx — merged, a prerequisite that has already landed — @chai3-bot — not yours to merge — already merged — drawn because something here still depends on it, and nothing is waiting on it any more — approved by @wa0x6e — merged — nothing on this page has to merge before it — merges before stamp#594</title><a href="https://github.com/snapshot-labs/stamp/pull/593" target="_blank" rel="noopener"><rect class="box" x="10" y="58" width="270" height="66" rx="6" fill="none" stroke="currentColor" stroke-width="2.5"/><text class="ref" x="40" y="73" font-size="10.5">stamp#593</text><text class="st" x="270" y="73" font-size="9.5" text-anchor="end">● merged</text><g class="av" aria-hidden="true"><use href="#av2" x="20" y="62"/><circle class="avring" cx="27" cy="69" r="7" fill="none" stroke="currentColor" stroke-width="0.5"/></g><text class="ttl" x="20" y="88" font-size="11">fix(errors): silence upstream RPC 5xx</text><text class="mark m-foreign" x="20" y="103" font-size="9.5"><tspan class="g">◇</tspan> @chai3-bot</text><text class="mark m-approved" x="20" y="115" font-size="9.5"><tspan class="g">✓</tspan> approved @wa0x6e</text></a></g>
+</svg>
+</div>
+<p class="legend fills">
+<span><span class="k">card fill</span> the state of the PR</span>
+<span><span class="sw st-open">○</span>open</span>
+<span><span class="sw st-draft">◌</span>draft</span>
+<span><span class="sw st-merged">●</span>merged — a prerequisite that has already landed</span>
+</p>
+<p class="legend">
+<span><span class="k">left to right</span> merge order</span>
+<span><span class="k">arrow</span> merge the tail before the head</span>
+<span><span class="k">same column</span> one rank — no order between them</span>
+<span><span class="k">dashed line</span> crosses repos</span>
+<span><span class="k">dashed card</span> not one of tony8713's open PRs</span>
+<span><span class="k">dotted card</span> a tracked bot's open PR (@chai3-bot) — scheduled here like tony8713's own</span>
+<span><span class="k">◇ @handle</span> whose PR it is, when it is not tony8713's to merge</span>
+<span><span class="k appr">✓ approved @handle</span> a human other than tony8713: thicker border</span>
+<span><span class="k chreq">✗ changes requested @handle</span> outranks an approval: thicker border, in red</span>
+<span><span class="k crit">⊘</span> the PR's own title says do not merge</span>
+<span><span class="k crit">⊗</span> waits on a PR that was closed without merging</span>
+<span><span class="k gate">GATED</span> release-gated: a published release, not just a merge</span>
+<span><span class="k met">✓ MET</span> that prerequisite has already landed</span>
+</p>
+</figure>
+
+<div class="folds">
+
+<details class="fold">
+<summary>How to read this graph</summary>
+<p><strong>Read the graph left to right. A PR sits to the right of the things it needs.</strong>
+One card per PR; an arrow runs from a prerequisite rightward to the PR that waits on it. A deep
+graph is a wide one: it scrolls sideways rather than shrinking. Hovering a card or an arrow gives
+the full title and the edges it sits on.</p>
+<ul>
+<li>Every arrow runs <strong>from a prerequisite rightward to the PR that waits on it</strong>, so
+    the leftmost column merges <strong>first</strong> and the rightmost column merges
+    <strong>last</strong>. A PR with no arrow arriving at it has nothing left to wait for.</li>
+<li><strong>Order is the horizontal axis only.</strong> One column is one rank, and the PRs stacked
+    inside a column are <strong>independent of one another</strong> — none of them waits on any
+    other, so they can merge in any order or all at the same time. How high or low a card sits in
+    its column means <em>nothing</em>; it is just packing. Each column header says how many PRs
+    stand under it and repeats that there is no order between them.</li>
+<li><strong>Every PR is drawn exactly once</strong>, as one card carrying its repo, its number and
+    its title. A PR that two others need is one card with two arrows leaving it, not two cards.</li>
+<li><strong>Whole chains are drawn, not just tony8713's share of them.</strong> If one PR in a
+    chain is tony8713's, or one of @chai3-bot's, every PR joined to it — following the arrows in <em>either</em>
+    direction — is drawn too, whoever wrote it. A chain with none of theirs in it is
+    not drawn at all, and nothing arrives here except through a declared dependency.</li>
+<li><strong>Every card that is not tony8713's says so</strong>, wherever it sits: dashed, and
+    marked <code>◇ @handle</code>, including one that starts a chain and has prerequisites of its
+    own. An unmarked card is tony8713's — that marker is the only thing that says whose a PR
+    is, so read it.</li>
+<li><strong>A tracked bot's PR is dotted, not dashed</strong> — @chai3-bot — and it is on this
+    page for a different reason from every other card that is not tony8713's. A dashed card is
+    here because it stands <em>in the way</em> of tony8713's work; a dotted one is here
+    because it <em>is</em> work this page schedules, so it appears alone or mid-chain on its own
+    account, takes arrows in and out, and is release-gated like any other. It still carries
+    <code>◇ @handle</code>, and it is <em>not</em> counted in tony8713's open-PR total at the
+    top — it has its own count beside it.</li>
+<li><strong>The colour a card is filled with is the state of that PR</strong> —
+    <span class="sw st-open">○</span>open,
+    <span class="sw st-draft">◌</span>draft, or
+    <span class="sw st-merged">●</span>merged. It says nothing about whether a
+    PR is <em>ready</em>; that is what the arrows say. Every card also prints its state as a glyph
+    and a word beside its ref, so none of it rests on telling one colour from another. A
+    <strong>merged</strong> card is only ever a prerequisite that has already landed — this page
+    lists open PRs, and a merged one is drawn only when something here still depends on it.</li>
+<li><strong>The whole trail is drawn, including the part already walked.</strong> A merged
+    prerequisite stays, and so does whatever <em>it</em> declared, so the chain behind an open PR is
+    shown end to end instead of starting halfway along. The arrow leaving a merged card is lighter
+    and labelled <code>✓ MET</code>: it records a wait that is <em>over</em>, and the PR at its head
+    is not held back by it. A column of nothing but merged cards is headed
+    <code>ALREADY MERGED</code>. A merged PR that <em>nothing</em> here depends on is not drawn at
+    all — this page is about what merges next.</li>
+</ul>
+</details>
+
+
+
+<details class="fold warn">
+<summary>2 PRs withheld from this page</summary>
+<p><strong>2 PRs withheld.</strong>
+       They are tony8713's own or a tracked bot's (@chai3-bot) and live in private repos,
+       and this page is served publicly, so they are not drawn here.
+       Neither blocks anything on this page, so no edge is
+              missing from the graph: withholding them costs the page
+              2 cards that would have had no edges anyway, not a broken chain.
+       Set <code>INCLUDE_PRIVATE=true</code> on a private build to see them.
+       This page does not pretend the work does not exist.</p>
+</details>
+
+<details class="fold">
+<summary>Declaring a prerequisite (the syntax this page reads)</summary>
+<p>Explicit stacks — a PR whose base branch is another open PR's head — are computed from the
+GitHub API and are always correct <em>while the prerequisite is open</em>; declaring one anyway is
+what keeps it drawn after that (see below). The other two kinds GitHub cannot see at all. Either way
+you write it in the <strong>PR body</strong> of the PR that is blocked, and it becomes an arrow
+<em>into</em> its card here:</p>
+<pre>Depends on #504
+Depends on snapshot-labs/snapshot.js#1225
+Depends on release of snapshot-labs/snapshot.js#1225
+Depends on #504 — reason, shown when you hover the arrow
+
+Stacked on #2219
+Stacked on top of #2188 (feat/safesnap-execution)
+On top of #2188</pre>
+<ul>
+<li><code>Depends on #504</code> — same repo. Satisfied once #504 is merged.</li>
+<li><code>Depends on owner/repo#123</code> — cross-repo. Satisfied once it is merged.</li>
+<li><code>Depends on release of owner/repo#123</code> — cross-repo and <em>release-gated</em>.
+    Merging is <strong>not</strong> enough: satisfied only once a non-draft release of that repo
+    is published <em>after</em> the PR merged. That edge is marked <code>GATED</code>.</li>
+<li><code>Stacked on</code>, <code>Stacked on top of</code> and <code>On top of</code> declare the
+    same thing as <code>Depends on</code>, in the words people actually write on a stacked PR. Each
+    takes the same three forms above.</li>
+<li>A trailing <code>—</code>, <code>-</code> or <code>:</code> adds a reason to a
+    <code>Depends on</code> line. On the three stack spellings that tail is <em>not</em> read as a
+    reason — what follows one is, in practice, an instruction to the reader
+    (<em>retarget to master after it merges</em>) rather than a description of the dependency, and it
+    is stale by the time the arrow is drawn. Those arrows are labelled with the branch name instead,
+    when you put one in parentheses after the number.</li>
+</ul>
+<p><strong>Declare the stack even though this page can compute one.</strong> An explicit stack is
+computed by matching a PR's base branch against the head branches of the repo's <em>open</em> PRs, so
+it exists only while the prerequisite is open: GitHub retargets the child onto the default branch
+seconds after the parent merges, and that signal is then gone for good. A merged prerequisite is kept
+on this page when something <em>declares</em> it, so the line in the body is what carries a stack
+across the moment it lands — without it the top of the chain disappears exactly when it merges.</p>
+<p><strong>Whose PRs appear here.</strong> Take the dependency graph and split it into
+<em>connected chains</em> — everything joined by dependency edges, following them in either
+direction. A chain is drawn <strong>in full</strong> if <strong>at least one</strong> PR in it is
+<code>tony8713</code>'s or @chai3-bot's; a chain with none of theirs in it is not drawn at all. So
+somebody else's PR is a full card here, with its own prerequisites, and can be the leftmost thing in
+the picture — what it never is, is unmarked: every card that is not <code>tony8713</code>'s is
+dashed and carries <code>◇ @handle</code>, and it is not counted in the open-PR total at the top.</p>
+<p><strong>Tracked bots.</strong> @chai3-bot is tracked here, which means its open PRs <em>seed</em> this page the way
+<code>tony8713</code>'s do: each one anchors its own chain, so it is drawn whether or not
+anything of <code>tony8713</code>'s is joined to it, and it sits wherever its dependencies put
+it — first column, last, or in the middle, exactly like any other card. There is no rule on this page
+about <em>where</em> a card may sit; rank comes from edges and nothing else. What tracking does
+<strong>not</strong> do is make the work <code>tony8713</code>'s: a bot's card is dotted rather
+than dashed, still carries <code>◇ @handle</code>, and is counted separately from the open-PR total
+at the top. A bot's PR in a private repo is withheld and counted in the notice above, on the same
+terms as <code>tony8713</code>'s own.</p>
+<p>This replaced a narrower rule — <em>somebody else's PR is drawn only as the target of one of
+tony8713's edges, never a card of its own</em> — which cut a chain off at the first PR that was
+not tony8713's and so hid what the rest of it was waiting for. The bound did not change:
+nothing is on this page that a declared dependency does not join, transitively, to a PR of
+tony8713's. Being recent, or in the same repo, or interesting, brings a PR no closer to being
+drawn.</p>
+<p><strong>Merged PRs, and the whole trail.</strong> One rule decides them:
+<em>a merged PR is drawn if and only if something on this graph depends on it.</em> A prerequisite
+that has landed is <strong>kept</strong> — because the question this page answers, why is that PR
+still open, is answered by the shape of the whole chain, and a chain that erases itself as it lands
+answers nothing. It is <strong>transitive</strong>: if a merged PR drawn here declared a prerequisite
+of its own, that one is on the same trail and is drawn too, so a merge partway along does not
+truncate the picture. The other half of the rule keeps the page usable — every PR this build fetches
+is open, so a merged PR that <em>nothing</em> here depends on is never picked up, and the org's whole
+merge history does not bury the twenty open PRs this page exists to order.</p>
+<p>The trail is merged at both ends of every link. A merged PR's declaration is followed only to a
+target that <em>also</em> merged: a declaration in a PR that has since merged is a claim about the
+past, and if its target is still open then the claim was never honoured — the PR merged anyway, so
+that gate was not real. Drawing the link would put an open card to the <em>left</em> of a merged one
+and assert it has to merge first, which is not just untrue but unsatisfiable. Those stale links are
+dropped, and the build log names each one rather than hiding it.</p>
+<p>A merged card sits under the chain rule like any other: it is drawn as part of the component that
+needs it, and dropped with that component if none of <code>tony8713</code>'s PRs is anywhere in
+it. It is never counted in the open-PR total at the top, because it is not open — and if it is
+somebody else's it keeps its dashed outline and its <code>◇ @handle</code> marker on top of the
+merged fill, because <em>whose</em> and <em>what state</em> are two separate channels and neither is
+allowed to cancel the other.</p>
+<p>A merged prerequisite is resolved <em>by number</em>, not out of the open-PR listing that explicit
+stacks and the candidate sweep are computed from — that listing cannot see a merged PR at all — so it
+keeps its real title, author and state instead of degrading to a bare number.</p>
+<p>Parsing rules, so prose never becomes an edge: the line must <strong>start</strong> with one of the
+four keywords (a leading <code>-</code> bullet is fine) and must be nothing but the declaration, so
+<em>Together with #2219, this will…</em> declares nothing; lines inside fenced code blocks are
+ignored; and <strong>blockquoted lines are ignored</strong>, so quoting another PR body — or a
+GitHub <code>[!IMPORTANT]</code> callout — never declares anything. Nothing on this page is inferred
+heuristically: an edge exists because somebody wrote it, and which spelling they wrote is the only
+thing that decides how the line is read.</p>
+</details>
+
+<details class="fold">
+<summary>How this page is built</summary>
+<p>Merge order runs left to right: an arrow's tail merges before its head, and PRs sharing a
+column have no order between them at all. Prerequisites GitHub cannot compute come from PR bodies —
+if an edge is missing here, declare it there. Rebuilt by hand when somebody publishes it, not on a
+schedule.</p>
+<p>The diagram is generated <strong>at build time</strong> as inline SVG and written into this file
+as markup. The page loads <strong>nothing</strong>: no Mermaid, no graph library, no CDN, no font, not
+one <code>&lt;script&gt;</code> tag. The blocks on this page are native
+<code>&lt;details&gt;</code> elements, so collapsing the prose off the page cost it no runtime
+either — the browser opens and shuts them on its own.</p>
+<p>The card geometry, the base ink and the arrowheads are presentation attributes on the SVG rather
+than CSS rules, so the drawing still reads with the stylesheet stripped. What the stylesheet adds is
+the theming: dark mode, the state fills, and the dash patterns.</p>
+</details>
+
+</div>
+</main></body></html>
